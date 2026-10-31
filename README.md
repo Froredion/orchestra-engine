@@ -58,30 +58,33 @@ It's built on the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
 > New here? [UNDERSTANDING.md](UNDERSTANDING.md) explains the whole system
 > from zero context: the why behind the design, the execution model, and how
 > workflows are organized.
->
-> Formerly **Loop Engine**. The launcher is now `./orchestra`, the package
-> `orchestra_engine`, and the overlay launcher `orchestra.sh`; the old
-> `LOOP_*` engine-location variables are still honored by the overlay launcher.
 
 ## Setup
 
-Two steps, once per machine.
+**You need:** Python 3.10+, and [Claude Code](https://code.claude.com) logged
+in (run `claude` once and log in), or an `ANTHROPIC_API_KEY` in your
+environment. No keys are stored in this repo.
 
-**1. Install the engine.** One command, the same on macOS, Linux, and Windows:
+**1. Get the code and install it.** The same on macOS, Linux, and Windows:
 
 ```bash
-python bootstrap.py
+git clone https://github.com/Froredion/orchestra-engine.git
+cd orchestra-engine
+python bootstrap.py        # python3 on some systems
 ```
 
-It creates a `.venv` with whatever Python you ran it with, installs the engine
-into it (editable), and prints the launcher for your platform. Needs Python
-3.10+; re-running is safe. (On some systems the command is `python3`.)
+Or hand it to your agent: ask Claude Code to *"clone
+github.com/Froredion/orchestra-engine and run its bootstrap.py"*. Put the clone
+somewhere permanent (beside your other repos): your agent runs the engine from
+that folder, whichever repo you're working in.
 
-Auth comes from your existing Claude Code login or `ANTHROPIC_API_KEY`. No
-keys are stored in this repo.
+Bootstrap creates a `.venv` with whatever Python you ran it with and installs the
+engine into it (editable). Re-running is safe, so run it again after a
+`git pull` that changes dependencies. Don't `pip install` by hand: bootstrap
+is the supported path, and `pyproject.toml` is the only dependency list.
 
-**2. Teach your coding agent to drive it.** Install the engine's agent
-guidance into your global Claude Code memory:
+**2. Teach your coding agent to drive it.** Bootstrap asks to do this for you
+(answer `y`). To do it later, or again after a `git pull`:
 
 ```bash
 ./orchestra --install-guidance     # orchestra --install-guidance on Windows
@@ -92,7 +95,8 @@ Don't skip this one: the agent is how the engine is meant to be used (see
 *agent* running it correctly. The guidance is the part that isn't discoverable
 from the code: launch a pipeline rather than reading its stage files, drive a
 run over `--channel` with no terminal, watch for escalations, and leave every
-permission prompt to the human, never answering one itself.
+permission prompt to the human, never answering one itself. It also records
+where this checkout lives, so your agent can run the engine from any repo.
 It lives in [orchestra_engine/agent_guidance.md](orchestra_engine/agent_guidance.md),
 versioned alongside the code it describes.
 
@@ -103,6 +107,30 @@ the block in place instead of stacking a second copy, so it's safe to run after
 every `git pull`. `--print-guidance` shows the block without writing anything;
 `--claude-md PATH` targets a different memory file (a repo's own `./CLAUDE.md`,
 say, to scope the guidance to one project).
+
+**3. Check it works.** Bootstrap ends by running this; run it yourself any time
+something seems off:
+
+```bash
+./orchestra --doctor               # orchestra --doctor on Windows
+```
+
+It checks Python, the dependencies, your Claude login, the agent guidance, and
+that every pipeline loads, and prints the command that fixes anything missing.
+It runs no agents and costs nothing. `ok` and `warn` lines mean you're ready;
+a `FAIL` line means a run would fail, so fix that first.
+
+```
+  ok    python            3.12.4
+  ok    claude_agent_sdk  installed
+  ok    questionary       installed
+  ok    pywebview         installed
+  ok    claude auth       logged in (claude.ai)
+  ok    agent guidance    current in /Users/you/.claude/CLAUDE.md
+  ok    pipelines         10 load
+
+Ready to run a pipeline.
+```
 
 ## How to use it
 
@@ -775,7 +803,9 @@ The engine lives in `orchestra_engine/`; every built-in pipeline is a folder of
 numbered prompt files under `orchestra_engine/pipelines/`. `./orchestra` and `orchestra.cmd`
 launch this repo; [`overlay-template/`](overlay-template/) is not part of this
 repo's own operation at all; it's the folder you copy to start a pipelines-only
-repo ([recipe](#connect-a-new-repo-make-one-that-is-only-pipelines)). Two sources
+repo ([recipe](#connect-a-new-repo-make-one-that-is-only-pipelines)). The engine
+was formerly **Loop Engine**; the old `LOOP_*` engine-location variables are still
+honored by the overlay launcher. Two sources
 stay authoritative, so this file can't drift out of sync with the code:
 
 - **The engine's source map** (what each module does) is the module table in

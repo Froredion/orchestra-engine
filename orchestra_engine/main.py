@@ -11,7 +11,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from . import channel, guidance, ui, viewer, window, wizard
+from . import channel, doctor, guidance, ui, viewer, window, wizard
 from .engine import DEFAULT_SETTING_SOURCES, run_loop
 from .engine.shapes import FanOutInterrupted
 from .pipeline import (
@@ -51,6 +51,8 @@ how it works
   run never overwrites another's evidence.
 
 see also
+  --doctor           check this machine is ready: Python, dependencies, Claude
+                     login, agent guidance, pipelines. Runs no agents
   --install-guidance once per machine: teach your coding agent how to drive this
                      engine, as one <orchestra-engine> block in ~/.claude/CLAUDE.md
   --list             what the built-in pipelines are and what stages they run
@@ -84,6 +86,14 @@ def parse_args() -> argparse.Namespace:
         "GitHub Markdown file to see the flow.",
     )
     parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Check this machine is ready to run a pipeline (Python, dependencies, "
+        "Claude login, agent guidance, pipelines) and print the fix for anything "
+        "missing, then exit. Runs no agents and spends nothing. Exits 1 if a "
+        "required check fails.",
+    )
+    parser.add_argument(
         "--install-guidance",
         action="store_true",
         help="Install this engine's agent guidance into your global Claude Code "
@@ -102,7 +112,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Which memory file --install-guidance writes to (default: "
+        help="Which memory file --install-guidance writes to and --doctor checks (default: "
         "~/.claude/CLAUDE.md). Point it at a repo's ./CLAUDE.md to scope the "
         "guidance to one project instead.",
     )
@@ -551,6 +561,9 @@ def main() -> None:
     if args.view is not None:
         view_command(args.view)
         return
+    if args.doctor:
+        # Read-only, like --list: checks the machine, runs no agents.
+        sys.exit(0 if doctor.report(doctor.run_checks(args.claude_md)) else 1)
     if args.install_guidance or args.print_guidance:
         # Before anything else: this writes one memory file and runs no agents.
         install_guidance(args)

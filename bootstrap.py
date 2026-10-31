@@ -48,6 +48,10 @@ def main() -> None:
             f"Install a newer Python and run: python bootstrap.py"
         )
 
+    # Line-buffered, so this script's headers land in order with the output of
+    # the commands it runs, even when piped to a log.
+    sys.stdout.reconfigure(line_buffering=True)
+
     py = venv_python(VENV)
     if py.exists():
         print(f"Reusing existing virtualenv at {VENV}")
@@ -65,16 +69,34 @@ def main() -> None:
 
     launcher = "orchestra" if sys.platform == "win32" else "./orchestra"
     print(
-        "\n===== setup complete =====\n"
-        f"Run the orchestra from this folder with:\n"
-        f"  {launcher}                 # setup wizard\n"
-        f'  {launcher} "your task" -y  # scripted, autonomous\n\n'
+        "\n===== engine installed =====\n"
         "Auth comes from your existing Claude Code login or ANTHROPIC_API_KEY.\n\n"
-        "One more command, once per machine — teach your coding agent how to\n"
-        "drive this engine (writes a <orchestra-engine> block to ~/.claude/CLAUDE.md,\n"
-        "leaving the rest of that file alone):\n"
-        f"  {launcher} --install-guidance"
+        "One more thing, once per machine: teach your coding agent how to drive\n"
+        "this engine. That writes one <orchestra-engine> block to ~/.claude/CLAUDE.md\n"
+        "and leaves the rest of that file alone."
     )
+    # Ask rather than just do it: it writes outside this repo. With no terminal
+    # (CI, a script) nobody can answer, so print the command instead.
+    if sys.stdin.isatty():
+        answer = input("Install the agent guidance now? [Y/n] ").strip().lower()
+        if answer in ("", "y", "yes"):
+            subprocess.run([str(py), "-m", "orchestra_engine", "--install-guidance"])
+        else:
+            print(f"Skipped. Run it later with: {launcher} --install-guidance")
+    else:
+        print(f"Run it with: {launcher} --install-guidance")
+
+    # End on a verdict, not a wall of pip output: is this machine ready?
+    print("\n===== checking this machine =====")
+    ready = subprocess.run([str(py), "-m", "orchestra_engine", "--doctor"]).returncode == 0
+    print(
+        f"\nRun the orchestra from this folder with:\n"
+        f"  {launcher}                 # setup wizard\n"
+        f'  {launcher} "your task" -y  # scripted, autonomous\n'
+        f"  {launcher} --doctor        # re-check setup any time"
+    )
+    if not ready:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

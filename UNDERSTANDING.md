@@ -460,6 +460,7 @@ The code side mirrors the same discipline — one module, one job:
 | [interaction.py](orchestra_engine/interaction.py) | Human-in-the-loop surfaces: stage gates, tool approval, agent questions. |
 | [ui.py](orchestra_engine/ui.py) | Terminal pickers/prompts, nothing else. |
 | [guidance.py](orchestra_engine/guidance.py) | Installs `agent_guidance.md` into a Claude Code memory file as one `<orchestra-engine>` block, in place and idempotently. Touches no run. |
+| [doctor.py](orchestra_engine/doctor.py) | `--doctor`: checks the machine is ready (Python, dependencies, Claude login, agent guidance, pipelines) and prints the fix for each gap. Runs no agents. |
 
 Two boundary rules keep the structure honest as it grows: **imports flow one
 way** (`model` ← `pipeline` ← `engine`; nothing imports "up"), and **the SDK

@@ -29,6 +29,11 @@ how to *drive* the engine as an agent (launch pipelines instead of reading
 them, `-i` over a pipe, permission gates are the human's to answer) — into
 `~/.claude/CLAUDE.md` as one `<orchestra-engine>` block. Idempotent, and it leaves
 the rest of that file untouched. Re-run it whenever the guidance changes.
+(Bootstrap offers to run it for you.)
+
+`./orchestra --doctor` checks the machine is ready (Python, dependencies, Claude
+login, guidance, pipelines) and prints the fix for each gap. Bootstrap runs it
+last; run it first when a setup problem is suspected.
 
 ## Learn how it works
 
