@@ -1,5 +1,7 @@
 """--list: what an agent with no context learns before running anything."""
 
+from pathlib import Path
+
 import pytest
 
 from orchestra_engine.main import describe_pipelines, graph_pipelines
@@ -25,7 +27,7 @@ def test_shows_each_stage_and_its_shape():
 
 def test_points_at_the_prompt_files():
     """The signature is a summary; the prompts are the ground truth."""
-    assert "orchestra_engine/pipelines/" in describe_pipelines(["feature"])
+    assert str(Path("orchestra_engine", "pipelines", "feature")) in describe_pipelines(["feature"])
 
 
 def test_describes_a_custom_pipeline_directory(tmp_path):

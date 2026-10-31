@@ -56,7 +56,7 @@ def _load_checkpoint(path: Path | None, log: Callable[[str], None], stage: str) 
     if path is None or not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         # A checkpoint that can't be read costs re-running the items, never
         # skipping one that didn't finish — so ignore it and say so.
@@ -70,7 +70,7 @@ def _save_checkpoint(path: Path, done: dict) -> None:
     """Write atomically: a crash mid-write must leave the previous record, not half of one."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"done": done}, indent=2))
+    tmp.write_text(json.dumps({"done": done}, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -179,7 +179,7 @@ def _read_fan_out_items(
             f"fan_out file {stage.fan_out!r} not found in the artifacts directory "
             f"— the previous stage was expected to write it"
         )
-    items = [line.strip() for line in path.read_text().splitlines()]
+    items = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     items = [i for i in items if i and not i.startswith("#")]
     if not items:
         raise ValueError(f"fan_out file {stage.fan_out!r} is empty")

@@ -68,6 +68,31 @@ def _write_private(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+def _claim_viewer(payload: dict) -> bool:
+    """Name this process in viewer.json unless a live viewer already holds it.
+
+    First writer wins: a spare that overwrote the file would strand whichever
+    run had already connected to the viewer it named. os.link is the atomic
+    "create only if absent" on both POSIX and NTFS.
+    """
+    path = home() / VIEWER_FILE
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    _write_private(tmp, payload)
+    try:
+        while True:
+            try:
+                os.link(tmp, path)
+                return True
+            except FileExistsError:
+                held = _read_viewer()
+                if held and channel._alive(held["pid"]) and _ping(held):
+                    return False
+                # Stale (dead viewer, or torn file): clear it and race again.
+                path.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def register(run_id: str, channel_dir: Path) -> None:
     if not RUN_ID_RE.match(run_id):
         raise ValueError(f"bad run id {run_id!r}")
@@ -209,11 +234,15 @@ def serve_forever() -> None:
 
     root = home()
     server = webui.LiveView()
-    _write_private(root / VIEWER_FILE, {
-        "pid": os.getpid(), "port": server.server_address[1], "token": server.token,
-    })
     import threading
+    # Serving before claiming, so a rival checking our claim gets an answer
+    # rather than mistaking us for stale.
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    if not _claim_viewer({
+        "pid": os.getpid(), "port": server.server_address[1], "token": server.token,
+    }):
+        server.shutdown()
+        return
     idle_since = time.monotonic()
     try:
         while True:

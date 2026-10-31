@@ -73,7 +73,7 @@ BUILTIN_PIPELINES_DIR = Path(__file__).parent / "pipelines"
 # adds its own pipelines without copying the engine. Set it to that repo's
 # pipelines/ dir (os.pathsep-separated for several).
 PIPELINES_PATH_ENV = "ORCHESTRA_PIPELINES_PATH"
-DEFAULT_HANDOFF_TEMPLATE = (Path(__file__).parent / "handoff.md").read_text()
+DEFAULT_HANDOFF_TEMPLATE = (Path(__file__).parent / "handoff.md").read_text(encoding="utf-8")
 
 _STAGE_FILE_RE = re.compile(r"^\d+[-_](?P<name>.+)\.md$")
 _STAGE_OPTIONS = (
@@ -376,7 +376,7 @@ def _load_redirect(value: str, source: Path) -> tuple[str, str] | None:
     """
     target = (source.parent / Path(value).expanduser()).resolve()
     try:
-        text = target.read_text()
+        text = target.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     body = _strip_frontmatter_block(text)
@@ -392,7 +392,9 @@ def _check_artifacts_relative(value: str, option: str, source: Path) -> None:
     path at read time, since only that catches a symlink an agent plants.
     """
     path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
+    # anchor, not is_absolute(): on Windows "/etc/x" and "C:x" aren't absolute
+    # but still leave the directory they're joined to.
+    if path.anchor or ".." in path.parts:
         raise ValueError(
             f"{source}: {option} must be a relative path inside the run's "
             f"artifacts directory, got {value!r}"
@@ -521,7 +523,7 @@ def load_pipeline(name_or_path: str) -> Pipeline:
     for file in sorted(path.glob("*.md")):
         match = _STAGE_FILE_RE.match(file.name)
         if match:
-            stages.append(_parse_stage(match.group("name"), file.read_text(), file))
+            stages.append(_parse_stage(match.group("name"), file.read_text(encoding="utf-8"), file))
     if not stages:
         raise ValueError(
             f"No stage files in {path} — expected numbered prompts like 01-plan.md"
@@ -548,6 +550,6 @@ def load_pipeline(name_or_path: str) -> Pipeline:
         )
 
     handoff_file = path / "handoff.md"
-    handoff = handoff_file.read_text() if handoff_file.is_file() else DEFAULT_HANDOFF_TEMPLATE
+    handoff = handoff_file.read_text(encoding="utf-8") if handoff_file.is_file() else DEFAULT_HANDOFF_TEMPLATE
 
     return Pipeline(name=path.name, stages=tuple(stages), handoff_template=handoff)

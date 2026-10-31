@@ -202,8 +202,8 @@ def test_every_stage_gets_prior_session_transcripts(run, research, tmp_path, mon
     def assert_reachable(call):
         assert "--- PRIOR SESSION TRANSCRIPTS ---" in call["prompt"]
         assert "Extract the fact, not the file." in call["prompt"]
-        assert "/fake/projects/slug/sess-x.jsonl" in call["prompt"]
-        assert call["extra_add_dirs"] == ["/fake/projects/slug"]
+        assert str(Path("/fake/projects/slug/sess-x.jsonl")) in call["prompt"]
+        assert call["extra_add_dirs"] == [str(Path("/fake/projects/slug"))]
 
     # search (repeat), deep-dive (fan-out), understand (terminal) are the three
     # non-router shapes that received nothing before this change.

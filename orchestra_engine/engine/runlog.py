@@ -228,6 +228,6 @@ def write_run_log(
         "total_cost_usd": sum(r.cost_usd or 0 for r in results),
     }
     tmp = path.with_name(f"{log_name}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2))
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp, path)
     return path

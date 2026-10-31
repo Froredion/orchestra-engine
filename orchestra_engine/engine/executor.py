@@ -551,7 +551,7 @@ def _gate_says_skip(stage: Stage, artifacts: Path, log: Callable[[str], None]) -
         )
         return False
 
-    if gate.needle in path.read_text():
+    if gate.needle in path.read_text(encoding="utf-8"):
         log(f"[{stage.name}] gate: {gate.file} contains {gate.needle!r} — skipping.")
         return True
     log(f"[{stage.name}] gate: {gate.file} does not contain {gate.needle!r} — running.")
@@ -587,7 +587,7 @@ def _resolve_next(
         log(f"[{stage.name}] no {DECISION_FILE} written — advancing.")
         return advance
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         log(f"[{stage.name}] DECISION IGNORED: {DECISION_FILE} unreadable ({exc}) — advancing.")
         return advance

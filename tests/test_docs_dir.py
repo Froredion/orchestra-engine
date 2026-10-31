@@ -9,6 +9,8 @@ operator's folder takes an explicit grant, and only the stages that ask for it
 by name get one.
 """
 
+from pathlib import Path
+
 import pytest
 
 from orchestra_engine.engine import run_loop
@@ -165,8 +167,8 @@ def test_flag_defaults_to_a_folder_beside_the_runs(monkeypatch):
 
     monkeypatch.setattr("sys.argv", ["loop", "task", "--pipeline", "approach"])
     args = parse_args()
-    assert str(args.docs_dir) == "orchestra-docs/plans"
-    assert str(args.runs_dir) == "orchestra-docs/runs"
+    assert Path(args.docs_dir) == Path("orchestra-docs/plans")
+    assert Path(args.runs_dir) == Path("orchestra-docs/runs")
 
 
 def test_flag_is_overridable(monkeypatch):
@@ -175,7 +177,7 @@ def test_flag_is_overridable(monkeypatch):
     monkeypatch.setattr(
         "sys.argv", ["loop", "task", "--pipeline", "approach", "--docs-dir", "/tmp/d"]
     )
-    assert str(parse_args().docs_dir) == "/tmp/d"
+    assert Path(parse_args().docs_dir) == Path("/tmp/d")
 
 
 def test_a_pipeline_that_publishes_nothing_leaves_no_folder(tmp_path, run, record):

@@ -3,6 +3,7 @@ can see, and that answers go through the channel's own checks."""
 
 import http.client
 import json
+import os
 import threading
 
 import pytest
@@ -164,6 +165,7 @@ def test_oversized_answer_is_refused(view):
 # ---- the index and summaries ------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has ACLs, not POSIX mode bits")
 def test_home_and_index_are_private(home, run):
     assert home.stat().st_mode & 0o077 == 0
     assert (home / "index" / "r1.json").stat().st_mode & 0o077 == 0
@@ -206,9 +208,9 @@ def test_ensure_viewer_starts_one_and_reuses_it():
         assert page_open is False
         again, _ = viewer.ensure_viewer()
         assert again["pid"] == info["pid"] and again["port"] == info["port"]
-        assert (viewer.home() / viewer.VIEWER_FILE).stat().st_mode & 0o077 == 0
+        if os.name != "nt":  # Windows has ACLs, not POSIX mode bits
+            assert (viewer.home() / viewer.VIEWER_FILE).stat().st_mode & 0o077 == 0
     finally:
-        import os
         import signal
         os.kill(info["pid"], signal.SIGTERM)
 

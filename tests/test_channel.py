@@ -1,6 +1,7 @@
 """The control channel: prompts answered by id, events a watcher can stream."""
 
 import asyncio
+import os
 import threading
 import time
 
@@ -153,6 +154,7 @@ def test_reused_channel_is_refused(tmp_path):
         channel.open_channel(tmp_path / "c", forbidden={})
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has ACLs, not POSIX mode bits")
 def test_channel_dir_is_private(chan):
     assert chan.dir.stat().st_mode & 0o077 == 0
 
