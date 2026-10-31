@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loop</title>
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #f3f3f1; --raised: #ffffff; --line: #e4e4e0;
+  --text: #1d1d1b; --muted: #6b6b66; --faint: #9a9a94;
+  --accent: #3b6fd8; --accent-soft: #e6eefc;
+  --ok: #2f8a4f; --err: #c4413a; --err-soft: #fbeceb;
+  --warn: #a8660b; --warn-soft: #fdf3e1;
+  --code: #f1f1ee;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161616; --panel: #1c1c1c; --raised: #222222; --line: #2e2e2e;
+    --text: #e6e6e3; --muted: #9a9a95; --faint: #6c6c68;
+    --accent: #7aa2f7; --accent-soft: #1f2a40;
+    --ok: #6cc28a; --err: #ef7a72; --err-soft: #3a2220;
+    --warn: #e2a64a; --warn-soft: #3a2e1a;
+    --code: #1f1f1f;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  display: grid; grid-template-columns: 264px 1fr; overflow: hidden;
+}
+/* ---- sidebar ---- */
+aside {
+  background: var(--panel); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.brand { padding: 16px 18px 6px; font-weight: 600; letter-spacing: .02em; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+.section { padding: 10px 18px 4px; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; }
+.runs { list-style: none; margin: 0; padding: 0 8px 8px; overflow-y: auto; max-height: 38vh; flex: none; }
+.runs li { display: grid; grid-template-columns: 8px 1fr; gap: 2px 10px; align-items: center; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+.runs li:hover { background: var(--line); }
+.runs li.sel { background: var(--raised); box-shadow: inset 0 0 0 1px var(--line); }
+.runs .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.runs .sub { grid-column: 2; font-size: 11px; color: var(--faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runs .waiting .dot, .runs li.waiting .dot { background: var(--warn); border-color: var(--warn); animation: pulse 1.1s infinite; }
+.runs li.waiting .sub { color: var(--warn); }
+.runs li.finished .dot { background: var(--ok); border-color: var(--ok); }
+.runs li.stopped .dot { background: var(--err); border-color: var(--err); }
+.runs li.running .dot, .runs li.starting .dot { background: var(--accent); border-color: var(--accent); animation: pulse 1.4s infinite; }
+.empty { padding: 4px 18px 10px; font-size: 12px; color: var(--faint); }
+.task {
+  padding: 12px 18px 4px; border-top: 1px solid var(--line); font-size: 15px; font-weight: 600; line-height: 1.35;
+  flex: none; overflow-wrap: anywhere; cursor: pointer;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+.task.open { display: block; max-height: 40vh; overflow-y: auto; }
+.taskcard { border: 1px solid var(--line); background: var(--raised); border-radius: 8px; padding: 10px 14px; margin: 12px 0; max-height: 220px; overflow-y: auto; }
+.taskcard .t { display: block; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+.taskcard .text > :first-child { margin-top: 0; } .taskcard .text > :last-child { margin-bottom: 0; }
+.pipeline { padding: 0 18px 14px; color: var(--muted); font-size: 12px; font-family: var(--mono); }
+.stages { list-style: none; margin: 0; padding: 6px 8px; overflow-y: auto; flex: 1; border-top: 1px solid var(--line); }
+.stages li {
+  display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 6px;
+  cursor: pointer; color: var(--muted);
+}
+.stages li:hover { background: var(--line); }
+.stages li.running { color: var(--text); background: var(--accent-soft); }
+.stages li.done, .stages li.error { color: var(--text); }
+.stages .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stages .meta { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; border: 1px solid var(--faint); }
+.running .dot { background: var(--accent); border-color: var(--accent); animation: pulse 1.4s infinite; }
+.done .dot { background: var(--ok); border-color: var(--ok); }
+.error .dot { background: var(--err); border-color: var(--err); }
+.skipped .dot { background: transparent; border-style: dashed; }
+.skipped .name { text-decoration: line-through; }
+@keyframes pulse { 50% { opacity: .35; } }
+.foot { border-top: 1px solid var(--line); padding: 12px 18px; font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+.foot .rundir { font-family: var(--mono); font-size: 11px; color: var(--faint); word-break: break-all; user-select: all; }
+/* ---- main ---- */
+main { display: flex; flex-direction: column; min-height: 0; position: relative; }
+header {
+  display: flex; align-items: center; gap: 10px; padding: 10px 24px;
+  border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted); min-height: 44px;
+}
+header .status { display: flex; align-items: center; gap: 8px; color: var(--text); font-weight: 500; }
+header .status.waiting { color: var(--warn); }
+header .status.ended { color: var(--muted); }
+header .spacer { flex: 1; }
+#feed { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+.col { max-width: 840px; margin: 0 auto; padding: 8px 28px 40px; }
+.stage-h {
+  display: flex; align-items: baseline; gap: 10px; margin: 28px 0 10px; padding-top: 14px;
+  border-top: 1px solid var(--line); font-weight: 600; font-size: 13px;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.stage-h .when { font-weight: 400; color: var(--faint); font-size: 12px; text-transform: none; letter-spacing: 0; font-family: var(--mono); }
+.stage-h:first-child { border-top: 0; margin-top: 12px; }
+.msg { margin: 8px 0; }
+.who { font-size: 11px; font-family: var(--mono); color: var(--faint); margin-bottom: 2px; }
+.thinking {
+  color: var(--muted); font-size: 13px; border-left: 2px solid var(--line);
+  padding: 2px 0 2px 12px; white-space: pre-wrap;
+}
+.thinking::before { content: "Thinking"; display: block; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 2px; }
+.text p { margin: 6px 0; }
+.text h1, .text h2, .text h3, .text h4, .text h5, .text h6 { margin: 14px 0 4px; font-size: 14px; }
+.text h1 { font-size: 16px; } .text h2 { font-size: 15px; }
+.text ul, .text ol { margin: 4px 0; padding-left: 22px; }
+.text li > p { margin: 2px 0; }
+.text a { color: var(--accent); }
+.text blockquote { margin: 6px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--line); color: var(--muted); }
+.text hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.text table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+.text th, .text td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+.text th { background: var(--panel); font-weight: 600; }
+.text img { max-width: 100%; }
+.text pre code { background: none; padding: 0; font-size: inherit; }
+.text code { font-family: var(--mono); font-size: 12.5px; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+.text pre, .result {
+  font-family: var(--mono); font-size: 12px; background: var(--code); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px 10px; overflow: auto; white-space: pre; margin: 6px 0;
+}
+.tool { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); min-width: 0; margin: 4px 0; }
+.tool .name {
+  font-family: var(--mono); font-size: 11.5px; color: var(--accent); background: var(--accent-soft);
+  padding: 1px 7px; border-radius: 4px; flex: none;
+}
+.tool .detail { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result { max-height: 168px; color: var(--muted); margin: 2px 0 8px; }
+.result.err { color: var(--err); background: var(--err-soft); }
+.note { font-size: 13px; color: var(--muted); margin: 8px 0; }
+.note b { color: var(--text); font-weight: 500; }
+.callout {
+  border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 8px;
+  padding: 10px 14px; margin: 12px 0; white-space: pre-wrap; font-size: 13px;
+}
+.callout .t { font-weight: 600; color: var(--warn); display: block; margin-bottom: 4px; }
+.callout .text, .ask.text { white-space: normal; }
+.callout blockquote { border-left-color: var(--warn); }
+.callout .text > :first-child, .ask.text > :first-child { margin-top: 0; }
+.callout .text > :last-child, .ask.text > :last-child { margin-bottom: 0; }
+.end { text-align: center; color: var(--muted); font-size: 13px; margin: 32px 0 8px; }
+#jump {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 18px;
+  background: var(--raised); color: var(--text); border: 1px solid var(--line); border-radius: 16px;
+  padding: 5px 14px; font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+/* ---- prompt dock ---- */
+#dock { border-top: 1px solid var(--line); background: var(--panel); }
+#dock .col { padding: 14px 28px 18px; }
+.kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); }
+.kind.permission { color: var(--err); }
+.ask { margin: 4px 0 10px; font-size: 15px; font-weight: 500; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ask.mono { font-family: var(--mono); font-size: 12px; font-weight: 400; max-height: 180px; overflow: auto; background: var(--code); padding: 8px 10px; border-radius: 6px; }
+.opts { display: flex; flex-wrap: wrap; gap: 8px; }
+.opts button, .send {
+  font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--raised); color: var(--text);
+  border-radius: 7px; padding: 6px 12px; cursor: pointer; text-align: left; max-width: 100%;
+}
+.opts button:hover, .send:hover { border-color: var(--accent); }
+.opts button.on { border-color: var(--accent); background: var(--accent-soft); }
+.opts button .n { font-family: var(--mono); color: var(--faint); margin-right: 6px; }
+.opts button.allow { border-color: var(--ok); }
+.opts button.deny { border-color: var(--err); }
+.hint { margin-top: 8px; font-size: 12px; color: var(--faint); }
+.hint.err { color: var(--err); }
+textarea {
+  width: 100%; font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; resize: vertical; min-height: 64px;
+}
+textarea:focus { outline: none; border-color: var(--accent); }
+.row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
+@media (max-width: 820px) {
+  body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
+  .col, #dock .col { padding-left: 16px; padding-right: 16px; }
+  header { padding: 8px 16px; }
+}
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">Loop</div>
+  <div class="section">Runs</div>
+  <ul class="runs" id="runs"></ul>
+  <div class="empty" id="noruns" hidden>No runs yet — start one with ./orchestra "task"</div>
+  <div class="task" id="task" title="Click to show the whole task">Connecting…</div>
+  <div class="pipeline" id="pipeline"></div>
+  <ul class="stages" id="stages"></ul>
+  <div class="foot">
+    <div><span id="cost">$0.00</span> · <span id="elapsed">0s</span></div>
+    <div class="rundir" id="rundir"></div>
+  </div>
+</aside>
+<main>
+  <header>
+    <div class="status" id="status">Connecting…</div>
+    <div class="spacer"></div>
+    <div id="where"></div>
+  </header>
+  <div id="feed"><div class="col" id="col"></div></div>
+  <button id="jump" hidden>↓ New activity</button>
+  <div id="dock" hidden><div class="col" id="dockcol"></div></div>
+</main>
+<!--VENDOR-->
+<script>
+"use strict";
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+let selected = (location.hash.match(/run=([A-Za-z0-9._-]+)/) || [])[1] || null;
+history.replaceState(null, "", "/" + (selected ? "#run=" + selected : ""));  // token out of the URL bar
+const $ = (id) => document.getElementById(id);
+const feed = $("feed"), col = $("col");
+$("task").onclick = () => $("task").classList.toggle("open");
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// Agent text is untrusted (it quotes files from the workspace), and marked does
+// not sanitize, so every render goes through DOMPurify.
+marked.setOptions({gfm: true, breaks: true});
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A" && node.hasAttribute("href")) { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener noreferrer"); }
+});
+function md(src) {
+  return DOMPurify.sanitize(marked.parse(src), {FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select"], FORBID_ATTR: ["style"]});
+}
+function el(tag, cls, html) { const e = document.createElement(tag); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+function fmtDur(s) { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + "h " : "") + (h || m ? m + "m " : "") + (s % 60) + "s"; }
+function clock(ts) { return new Date(ts * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}); }
+
+// ---- state ----
+// Absolute paths drown the line they sit in; show them relative to the run.
+let roots = [];
+function tidy(text) {
+  let t = String(text);
+  for (const [abs, short] of roots) t = t.split(abs + "/").join(short).split(abs).join(short || ".");
+  return t;
+}
+const fresh = () => ({ next: 0, stages: [], status: {}, started: null, ended: null, cost: 0, current: null,
+                       pending: null, tools: {}, lastWho: null, failures: 0, done: false });
+let S = fresh();
+let gen = 0;  // bumps on every switch, so a stale poll can't write into the new run's view
+function selectRun(id) {
+  if (id === selected && S.next) return;
+  selected = id; gen++; S = fresh(); roots = []; follow = true;
+  col.innerHTML = ""; $("stages").innerHTML = ""; $("dock").hidden = true; $("jump").hidden = true;
+  $("task").textContent = "Loading…"; $("task").classList.remove("open"); $("pipeline").textContent = ""; $("rundir").textContent = "";
+  $("cost").textContent = "$0.00"; $("elapsed").textContent = "0s";
+  history.replaceState(null, "", "/#run=" + id);
+  renderRuns(); pollEvents();
+}
+
+// ---- scroll: follow the bottom unless the reader has scrolled up ----
+let follow = true;
+feed.addEventListener("scroll", () => {
+  follow = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  if (follow) $("jump").hidden = true;
+});
+$("jump").onclick = () => { follow = true; feed.scrollTop = feed.scrollHeight; $("jump").hidden = true; };
+function append(node) {
+  col.appendChild(node);
+  if (follow) requestAnimationFrame(() => { feed.style.scrollBehavior = "auto"; feed.scrollTop = feed.scrollHeight; feed.style.scrollBehavior = ""; });
+  else $("jump").hidden = false;
+}
+
+function renderStages() {
+  const ul = $("stages"); ul.innerHTML = "";
+  S.stages.forEach((name) => {
+    const st = S.status[name] || {state: "pending"};
+    const li = el("li", st.state);
+    li.appendChild(el("span", "dot"));
+    const n = el("span", "name"); n.textContent = name; li.appendChild(n);
+    const meta = el("span", "meta");
+    meta.textContent = st.dur != null ? fmtDur(st.dur) : (st.state === "running" ? "…" : "");
+    li.appendChild(meta);
+    li.onclick = () => { const h = document.querySelector(`[data-stage="${CSS.escape(name)}"]`); if (h) { follow = false; h.scrollIntoView({behavior: "smooth", block: "start"}); } };
+    ul.appendChild(li);
+  });
+}
+function setStatus(text, cls) { const s = $("status"); s.textContent = text; s.className = "status " + (cls || ""); }
+function refreshHeader() {
+  if (S.done) return;
+  if (S.pending) setStatus("● Waiting for you", "waiting");
+  else if (S.current) setStatus("Running · " + S.current);
+  else setStatus("Starting…");
+}
+setInterval(() => {
+  if (S.started) $("elapsed").textContent = fmtDur((S.ended || Date.now() / 1000) - S.started);
+  const cur = S.current && S.status[S.current];
+  if (cur && cur.state === "running") {
+    const li = [...document.querySelectorAll("#stages li")].find((x) => x.querySelector(".name").textContent === S.current);
+    if (li) li.querySelector(".meta").textContent = fmtDur(Date.now() / 1000 - cur.since);
+  }
+}, 1000);
+
+// ---- events ----
+function handle(e) {
+  switch (e.event) {
+    case "engine_started": S.started = e.ts; break;
+    case "run_started":
+      $("task").textContent = e.task || "(no task)";
+      if (e.task) { const c = el("div", "taskcard"); c.appendChild(el("span", "t", "Task")); c.appendChild(el("div", "text", md(e.task))); append(c); }
+      $("pipeline").textContent = e.pipeline || "";
+      $("rundir").textContent = e.run_dir || "";
+      $("rundir").title = e.run_dir || "";
+      roots = [[e.artifacts, "artifacts/"], [e.workspace, ""]].filter(([a]) => a);
+      S.stages = e.stages || []; renderStages(); break;
+    case "stage_started": {
+      S.current = e.stage; S.status[e.stage] = {state: "running", since: e.ts}; S.lastWho = null;
+      if (!S.stages.includes(e.stage)) S.stages.push(e.stage);
+      const h = el("div", "stage-h"); h.dataset.stage = e.stage;
+      h.appendChild(document.createTextNode(e.stage));
+      h.appendChild(el("span", "when", esc(clock(e.ts))));
+      append(h); renderStages(); break;
+    }
+    case "stage_finished": {
+      const st = S.status[e.stage] || {since: e.ts};
+      S.status[e.stage] = {state: e.is_error ? "error" : "done", dur: e.ts - st.since};
+      S.cost += e.cost_usd || 0; $("cost").textContent = "$" + S.cost.toFixed(2);
+      renderStages(); break;
+    }
+    case "stage_skipped":
+      S.status[e.stage] = {state: "skipped"}; renderStages();
+      append(el("div", "note", `<b>${esc(e.stage)}</b> skipped — ${esc(e.reason || "")}`)); break;
+    case "message": message(e); break;
+    case "prompt": S.pending = e; showPrompt(e); break;
+    case "answered":
+      if (S.pending && S.pending.id === e.id) { S.pending = null; $("dock").hidden = true; }
+      append(el("div", "note", `→ answered <b>${esc(labelFor(e))}</b>`)); break;
+    case "answer_rejected": if (S.pending && S.pending.id === e.id) hint(`Rejected: ${e.reason}`, true); break;
+    case "escalation": {
+      const c = el("div", "callout"); c.appendChild(el("span", "t", "Escalation raised"));
+      c.appendChild(el("div", "text", md(e.text || ""))); append(c); break;
+    }
+    case "run_complete":
+      S.done = true; S.ended = e.ts;
+      setStatus(e.escalations ? "Finished — escalations unresolved" : "Finished", "ended");
+      append(el("div", "end", "Run complete")); break;
+    case "engine_exited":
+      if (!S.done) { S.done = true; S.ended = e.ts; setStatus("Stopped: " + (e.reason || ""), "ended"); }
+      break;
+  }
+  refreshHeader();
+}
+const answerLabels = {};
+function labelFor(e) { return (answerLabels[e.id] || {})[e.answer] || e.answer; }
+
+function message(e) {
+  if (e.type === "tool_result") {
+    const anchor = S.tools[e.tool_use_id];
+    if (!e.text && !e.is_error) return;
+    const r = el("div", "result" + (e.is_error ? " err" : "")); r.textContent = tidy(e.text || "(error)");
+    if (anchor) { anchor.after(r); if (follow) feed.scrollTop = feed.scrollHeight; } else append(r);
+    return;
+  }
+  const who = e.label !== e.stage ? e.label : null;
+  if (who && who !== S.lastWho) append(el("div", "who", esc(who)));
+  S.lastWho = who;
+  if (e.type === "thinking") { const d = el("div", "msg thinking"); d.textContent = tidy(e.text); append(d); }
+  else if (e.type === "text") append(el("div", "msg text", md(tidy(e.text))));
+  else if (e.type === "tool") {
+    const t = el("div", "tool");
+    const n = el("span", "name"); n.textContent = e.tool; t.appendChild(n);
+    if (e.detail) { const d = el("span", "detail"); d.textContent = tidy(e.detail); d.title = e.detail; t.appendChild(d); }
+    if (e.tool_use_id) S.tools[e.tool_use_id] = t;
+    append(t);
+  }
+}
+
+// ---- prompts ----
+const KIND = {gate: "Next stage", question: "The agent is asking", permission: "Permission — needs you"};
+function hint(msg, isErr) { const h = $("dockcol").querySelector(".hint"); if (h) { h.textContent = msg; h.className = "hint" + (isErr ? " err" : ""); } }
+async function send(id, value) {
+  hint("Sending…");
+  try {
+    const r = await fetch("/api/answer", {method: "POST", headers: {"Content-Type": "application/json", "X-Orchestra-Token": TOKEN}, body: JSON.stringify({run: selected, id, value})});
+    const j = await r.json();
+    if (!r.ok) hint(j.error || "Refused", true); else hint("Sent.");
+  } catch { hint("Couldn't reach the engine.", true); }
+}
+function showPrompt(p) {
+  const dock = $("dockcol"); dock.innerHTML = "";
+  answerLabels[p.id] = {};
+  (p.options || []).forEach((o, i) => { answerLabels[p.id][String(i + 1)] = o.label; answerLabels[p.id][o.value] = o.label; });
+  dock.appendChild(el("div", "kind " + p.kind, esc(KIND[p.kind] || p.kind)));
+  // A permission request is shown verbatim: what gets approved must be exactly what was asked.
+  const ask = p.kind === "question" ? el("div", "ask text", md(p.message || "")) : el("div", "ask" + (p.kind === "permission" ? " mono" : ""));
+  if (p.kind !== "question") ask.textContent = p.message;
+  dock.appendChild(ask);
+  if (p.mode === "select") {
+    const opts = el("div", "opts");
+    p.options.forEach((o, i) => {
+      const b = el("button", o.value === "allow" ? "allow" : o.value === "deny" ? "deny" : "");
+      b.appendChild(el("span", "n", String(i + 1))); b.appendChild(document.createTextNode(o.label));
+      b.onclick = () => send(p.id, String(i + 1)); opts.appendChild(b);
+    });
+    dock.appendChild(opts);
+    dock.appendChild(el("div", "hint", p.options.length <= 9 ? "Click, or press 1–" + p.options.length : ""));
+  } else if (p.mode === "checkbox") {
+    const picked = new Set(p.options.map((o, i) => o.checked ? i + 1 : 0).filter(Boolean));
+    const opts = el("div", "opts");
+    p.options.forEach((o, i) => {
+      const b = el("button", picked.has(i + 1) ? "on" : "");
+      b.appendChild(el("span", "n", String(i + 1))); b.appendChild(document.createTextNode(o.label));
+      b.onclick = () => { picked.has(i + 1) ? picked.delete(i + 1) : picked.add(i + 1); b.classList.toggle("on"); };
+      opts.appendChild(b);
+    });
+    dock.appendChild(opts);
+    const row = el("div", "row"); const go = el("button", "send", "Submit");
+    go.onclick = () => send(p.id, [...picked].sort((a, b) => a - b).join(",")); row.appendChild(go);
+    dock.appendChild(row); dock.appendChild(el("div", "hint", ""));
+  } else {
+    const ta = el("textarea"); ta.placeholder = "Type your answer — Enter to send, Shift+Enter for a new line";
+    ta.onkeydown = (ev) => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(p.id, ta.value); } };
+    dock.appendChild(ta);
+    const row = el("div", "row"); const go = el("button", "send", "Send"); go.onclick = () => send(p.id, ta.value); row.appendChild(go);
+    dock.appendChild(row); dock.appendChild(el("div", "hint", ""));
+    setTimeout(() => ta.focus(), 0);
+  }
+  $("dock").hidden = false;
+}
+document.addEventListener("keydown", (ev) => {
+  const p = S.pending;
+  if (!p || p.mode !== "select" || ev.target.tagName === "TEXTAREA" || ev.metaKey || ev.ctrlKey) return;
+  const n = parseInt(ev.key, 10);
+  if (n >= 1 && n <= p.options.length) send(p.id, String(n));
+});
+
+// ---- runs ----
+let RUNS = [];
+function ago(ts) {
+  if (!ts) return "";
+  const d = Date.now() / 1000 - ts;
+  return d < 60 ? "just now" : d < 3600 ? Math.floor(d / 60) + "m ago" : d < 86400 ? Math.floor(d / 3600) + "h ago" : Math.floor(d / 86400) + "d ago";
+}
+const STATUS_TEXT = {waiting: "needs you", running: "running", starting: "starting", finished: "finished", stopped: "stopped"};
+function renderRuns() {
+  const ul = $("runs"); ul.innerHTML = "";
+  $("noruns").hidden = RUNS.length > 0;
+  RUNS.forEach((r) => {
+    const li = el("li", r.status + (r.id === selected ? " sel" : ""));
+    li.appendChild(el("span", "dot"));
+    const t = el("span", "t"); t.textContent = r.task || "(setting up…)"; t.title = r.task || ""; li.appendChild(t);
+    const sub = el("span", "sub");
+    sub.textContent = [STATUS_TEXT[r.status] || r.status, r.pipeline, ago(r.started)].filter(Boolean).join(" · ");
+    li.appendChild(sub);
+    li.onclick = () => selectRun(r.id);
+    ul.appendChild(li);
+  });
+  const waiting = RUNS.filter((r) => r.status === "waiting").length;
+  const cur = RUNS.find((r) => r.id === selected);
+  document.title = (waiting ? `● ${waiting} waiting — ` : "") + (cur && cur.task ? cur.task : "Loop");
+}
+let known = null;
+async function pollRuns() {
+  try {
+    const r = await fetch("/api/runs", {headers: {"X-Orchestra-Token": TOKEN}, cache: "no-store"});
+    if (!r.ok) throw new Error(r.status);
+    RUNS = (await r.json()).runs;
+    const ids = new Set(RUNS.map((x) => x.id));
+    const cur = RUNS.find((x) => x.id === selected);
+    const added = known ? RUNS.filter((x) => !known.has(x.id)) : [];
+    known = ids;
+    if (!selected || !cur) { if (RUNS.length) selectRun(RUNS[0].id); }
+    // A new run takes the view only from one that has ended — never from a
+    // run that is still going or still waiting on you.
+    else if (added.length && ["finished", "stopped"].includes(cur.status)) selectRun(added[0].id);
+    renderRuns();
+  } catch { /* the viewer may be restarting; the next poll tries again */ }
+  setTimeout(pollRuns, 1500);
+}
+
+// ---- events for the selected run ----
+let eventsTimer = null;
+async function pollEvents() {
+  clearTimeout(eventsTimer);
+  if (!selected) return;
+  const mine = gen;
+  try {
+    const r = await fetch(`/api/events?run=${encodeURIComponent(selected)}&from=${S.next}`, {headers: {"X-Orchestra-Token": TOKEN}, cache: "no-store"});
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    if (mine !== gen) return;
+    j.events.forEach(handle); S.next = j.next; S.failures = 0;
+  } catch {
+    if (mine !== gen) return;
+    if (++S.failures >= 5 && !S.done) setStatus("Can't reach the live view", "ended");
+  }
+  if (mine === gen) eventsTimer = setTimeout(pollEvents, S.done ? 3000 : 400);
+}
+pollRuns();
+if (selected) pollEvents();
+</script>
+</body>
+</html>

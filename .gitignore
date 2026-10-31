@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Run output (orchestra-docs/ is the default; loop-docs/ from before the rename)
+orchestra-docs/
+loop-docs/
+runs/
+workspace/
+workspace-*/
+
+# OS
+.DS_Store

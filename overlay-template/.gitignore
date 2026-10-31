@@ -1,0 +1,11 @@
+# Run output. The engine writes each run's artifacts and JSON log under here by
+# default (--runs-dir), and it's the run's reasoning, not this repo's source.
+orchestra-docs/
+runs/
+
+# Default --workspace, if you ever point one inside this repo.
+workspace/
+workspace-*/
+
+# OS
+.DS_Store

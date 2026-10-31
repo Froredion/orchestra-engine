@@ -1,0 +1,11 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Windows launchers must be CRLF; the POSIX ./orchestra stays LF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+orchestra  text eol=lf
+
+# orchestra.sh is copied out of this repo into other people's repos, so its line
+# endings must survive a checkout on any platform: CRLF breaks the #! line.
+*.sh  text eol=lf

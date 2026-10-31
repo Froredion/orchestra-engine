@@ -1,0 +1,11 @@
+#!/bin/sh
+# Zero-setup launcher: runs the Orchestra Engine with the repo's venv,
+# no activation needed.
+dir="$(cd "$(dirname "$0")" && pwd)"
+py="$dir/.venv/bin/python"
+if [ ! -x "$py" ]; then
+  echo "No venv found. Set it up first:" >&2
+  echo "  python3 bootstrap.py" >&2
+  exit 1
+fi
+exec "$py" -m orchestra_engine "$@"
