@@ -34,6 +34,10 @@ from . import channel, viewer
 
 TOKEN_HEADER = "X-Orchestra-Token"
 MAX_BODY_BYTES = 64 * 1024
+# How much of a refused request's body to wait for before closing, and for how
+# long. See _Handler._discard_unread.
+MAX_DISCARD_BYTES = 1024 * 1024
+DISCARD_SECONDS = 1.0
 
 
 VENDOR_SCRIPTS = ("marked.umd.js", "purify.min.js")
@@ -110,18 +114,42 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        try:
+            self._unread = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._unread = -1
+        self._answer_post()
+        self._discard_unread()
+
+    def _discard_unread(self) -> None:
+        """Wait for the rest of a body the request was answered without reading.
+
+        Clients send the headers and the body separately, and a refusal only needs
+        the headers. Closing straight away leaves the body to arrive at a closed
+        socket, and on Windows the reset that comes back destroys the response before
+        the client reads it, which lost about one refusal in ten. The answer has
+        already gone, so nobody waits on this. It is bounded in bytes and in time,
+        because a client can declare any length and send nothing.
+        """
+        if self._unread <= 0:
+            return
+        self.connection.settimeout(DISCARD_SECONDS)
+        try:
+            self.rfile.read(min(self._unread, MAX_DISCARD_BYTES))
+        except OSError:
+            pass
+
+    def _answer_post(self) -> None:
         if urlparse(self.path).path != "/api/answer":
             return self._send(404, b"not found", "text/plain")
         if not self._allowed(self.headers.get(TOKEN_HEADER)):
             return self._json(403, {"error": "forbidden"})
         if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return self._json(415, {"error": "JSON only"})
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = -1
+        length = self._unread
         if not 0 < length <= MAX_BODY_BYTES:
             return self._json(413, {"error": "body too large or empty"})
+        self._unread = 0
         try:
             body = json.loads(self.rfile.read(length))
             run_id, prompt_id, value = str(body["run"]), str(body["id"]), str(body["value"])
