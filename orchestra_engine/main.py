@@ -236,6 +236,19 @@ def parse_args() -> argparse.Namespace:
         "run. Made for a monitoring tool to stream.",
     )
     parser.add_argument(
+        "--only-stages",
+        action="store_true",
+        help="With --watch: leave out the per-message stream, keeping what a driver "
+        "acts on: stages starting and finishing, prompts, escalations, the run ending.",
+    )
+    parser.add_argument(
+        "--tail",
+        action="store_true",
+        help="With --watch: don't replay the events already on file. Say where the "
+        "run stands, including any prompt still waiting, then follow from there. For "
+        "re-arming a watcher partway through a run.",
+    )
+    parser.add_argument(
         "--no-stage-gates",
         action="store_true",
         help="In interactive mode, don't ask run/skip/quit before each stage — "
@@ -475,7 +488,7 @@ def channel_command(args) -> None:
         sys.exit("--answer and --watch need --channel DIR")
     if args.watch:
         try:
-            for line in channel.watch(args.channel):
+            for line in channel.watch(args.channel, only_stages=args.only_stages, tail=args.tail):
                 print(line, flush=True)
         except KeyboardInterrupt:
             pass
@@ -549,6 +562,8 @@ def view_command(target) -> None:
 def main() -> None:
     args = parse_args()
     _apply_pipelines_dir(args.pipelines_dir)
+    if (args.only_stages or args.tail) and not args.watch:
+        sys.exit("--only-stages and --tail only apply to --watch")
     if args.answer or args.watch:
         channel_command(args)
         return
@@ -641,8 +656,10 @@ async def _run(args, pipeline, wizard_mode: bool) -> None:
         reason = "finished" if isinstance(exc, SystemExit) and not exc.code else repr(exc)
         channel.emit("engine_exited", reason=reason)
         raise
-    channel.emit("engine_exited", reason="finished")
-    channel.close_channel()
+    else:
+        channel.emit("engine_exited", reason="finished")
+    finally:
+        channel.close_channel()
 
 
 async def _run_open(args, pipeline, wizard_mode: bool) -> None:

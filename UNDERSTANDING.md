@@ -144,6 +144,10 @@ maintain, say — with the target's own frontmatter ignored so it works as-is.
 The body below then serves as the fallback, and runs whenever that file isn't on
 the machine ([details](docs/authoring-pipelines.md#pointing-at-the-prompt-redirect)).
 
+And it can name what it owes: `produces: PLAN.md` fails the stage and stops the
+run if that document is missing or empty when the stage ends, whatever its session
+reported ([details](docs/authoring-pipelines.md#requiring-a-document-produces)).
+
 The template is rendered with Python `str.format`, with these placeholders:
 
 | Placeholder | Meaning |

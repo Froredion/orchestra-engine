@@ -58,6 +58,10 @@ class Stage:
     # body stood in for it.
     redirect: str | None = None
     redirect_source: str | None = None
+    # Documents this stage must leave in the artifacts dir. If one is missing or
+    # empty when the stage ends, the stage has failed and the run stops, whatever
+    # the session reported.
+    produces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -123,6 +127,9 @@ class StageResult:
     duration_ms: int | None = None
     iteration: int | None = None  # pass number, when the stage repeats
     item: str | None = None  # fan-out item this session worked on
+    # How many turns of its own the session took. More than one means it ended its
+    # turn and was woken again; num_turns and duration_ms cover all of them.
+    segments: int = 1
 
 
 @dataclass(frozen=True)

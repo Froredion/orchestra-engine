@@ -4,7 +4,9 @@ can see, and that answers go through the channel's own checks."""
 import http.client
 import json
 import os
+import socket
 import threading
+import time
 
 import pytest
 
@@ -162,6 +164,62 @@ def test_oversized_answer_is_refused(view):
     assert status == 413
 
 
+def _post_headers(v, path, headers, length):
+    """Send only a POST's headers, returning the socket to send the body and read
+    the answer on. Clients send the two separately, so a server that answers from the
+    headers alone can be done before the body gets there."""
+    port = v.server_address[1]
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    lines = [
+        f"POST {path} HTTP/1.1",
+        f"Host: 127.0.0.1:{port}",
+        f"Content-Length: {length}",
+        *(f"{name}: {value}" for name, value in headers.items()),
+    ]
+    sock.sendall("\r\n".join(lines).encode() + b"\r\n\r\n")
+    return sock
+
+
+def _read_to_end(sock):
+    data = b""
+    while chunk := sock.recv(65536):
+        data += chunk
+    return data
+
+
+@pytest.mark.parametrize(
+    "path, send_token, ctype, expected",
+    [
+        ("/api/answer", True, "application/json", 413),
+        ("/api/answer", False, "application/json", 403),
+        ("/api/answer", True, "text/plain", 415),
+        ("/nope", True, "application/json", 404),
+    ],
+)
+def test_a_refusal_survives_a_body_it_did_not_want(view, path, send_token, ctype, expected):
+    """A server that closes on answering turns the late body into a connection reset,
+    and on Windows that destroys the refusal before the client reads it. This is the
+    slow end of a race that lost about one refusal in ten over ordinary requests."""
+    headers = {"Content-Type": ctype, **(_auth(view) if send_token else {})}
+    body = b"x" * (webui.MAX_BODY_BYTES + 1)
+    with _post_headers(view, path, headers, len(body)) as sock:
+        time.sleep(0.1)  # the server has answered from the headers by now
+        sock.sendall(body)
+        time.sleep(0.1)  # and whatever the body set off has reached this socket
+        answer = _read_to_end(sock)
+    assert answer.startswith(f"HTTP/1.0 {expected} ".encode())
+
+
+def test_a_declared_body_that_never_comes_does_not_hold_the_connection(view, monkeypatch):
+    """Anyone can declare any length, so waiting for the body has to end. The answer
+    comes first, so the client isn't made to wait for that either."""
+    monkeypatch.setattr(webui, "DISCARD_SECONDS", 0.05)
+    headers = {"Content-Type": "application/json", **_auth(view)}
+    with _post_headers(view, "/api/answer", headers, 10**9) as sock:
+        answer = _read_to_end(sock)  # a server still waiting would time this out
+    assert answer.startswith(b"HTTP/1.0 413 ")
+
+
 # ---- the index and summaries ------------------------------------------------
 
 
@@ -189,6 +247,8 @@ def test_summary_statuses():
                       {"event": "engine_exited", "ts": 10}]
     assert s(done)["status"] == "finished" and s(done)["escalations"] and s(done)["cost_usd"] == 0.5
     assert s(started + [{"event": "engine_exited", "ts": 3}])["status"] == "stopped"
+    failed = started + [{"event": "run_complete", "ts": 9, "failed_stage": "plan"}]
+    assert s(failed)["status"] == "stopped", "a run that stopped on a failed stage didn't finish"
 
 
 def test_a_run_whose_engine_died_reads_as_stopped(run):

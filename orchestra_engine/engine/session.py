@@ -213,6 +213,19 @@ looking like nothing was given up. Most stages have nothing to write here and an
 absent file is the normal case: this is for the moment the run delivers less than
 was asked of it, not a log of what you weighed along the way.
 
+Ending your turn ends this stage. The message you send without a tool call is your
+report, and the run moves on. So don't end your turn until the stage's work is
+done, and never end it to wait: not on "waiting for X to start", and not on a
+background command or a notification you expect to wake you. A session woken that
+way can't use its tools. Its calls come back refused as if someone had said no,
+when nobody was asked, and the stage fails.
+
+To wait for something, stay in your turn and run one foreground shell command that
+blocks until it is true, such as `until <check>; do sleep 2; done`, with a timeout
+long enough for it. This holds even where a tool's own description points you at a
+background command or a later notification instead. Anything you do start in the
+background is yours to finish or stop before your last message.
+
 """
 
 INTERACTIVE_PREAMBLE = """\
@@ -281,6 +294,25 @@ BG_WAIT_ENV = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"
 BG_WAIT_DEFAULT_MS = str(2 * 60 * 60 * 1000)
 RETRY_BACKOFF_SECONDS = 2
 
+# What the CLI answers a tool call with when it could not get a permission
+# decision, word for word from its bundle (test_session_wake.py checks the bundle
+# still says it). It tells the agent a user refused and to stop.
+#
+# In a stage that is never true. A real refusal comes through can_use_tool with
+# the engine's own wording, and an unattended stage has no user at all. Seen live,
+# it comes from this sequence: a stage starts a background command and ends its
+# turn; the SDK sees the result, keeps no hold for a shell (it only holds for
+# delegated agents) and closes the session's stdin; the command finishes and wakes
+# the session for another turn. Permission requests and hooks both travel over
+# that stdin, so in an interactive stage every tool call of the woken turn, a plain
+# Read included, is refused within milliseconds with no prompt shown. The agent
+# obeys and stops, and the CLI reports success.
+#
+# A second session start alone doesn't mean this. A background sub-agent wakes the
+# session the same way, but the SDK holds stdin open for it and its follow-up turn
+# works, so the refusal is what fails a stage, not the wake.
+UNASKED_REFUSAL = "The user doesn't want to take this action right now"
+
 # The SDK caps a single JSON message at 1MB, which a fan-out agent reading a
 # large artifact blows past — taking the whole run with it. Agents crawl PDFs
 # and clone repos, so a tool result over 1MB is ordinary, not pathological.
@@ -299,6 +331,33 @@ def _is_permanent(exc: Exception) -> bool:
     """
     message = str(exc).lower()
     return any(marker in message for marker in PERMANENT_ERROR_MARKERS)
+
+
+def _refused_unasked(block: object) -> bool:
+    """Whether this tool result is the CLI refusing a call nobody was asked about."""
+    return (
+        isinstance(block, ToolResultBlock)
+        and bool(block.is_error)
+        and _result_text(block.content).startswith(UNASKED_REFUSAL)
+    )
+
+
+def _refusal_report(refused: list[str], woken: bool) -> str:
+    """Why a stage that reported success is being failed, for the run log and the
+    channel: the session's own last message usually reads like a calm stop."""
+    tools = ", ".join(dict.fromkeys(refused))
+    report = (
+        f"STAGE FAILED: {len(refused)} tool call(s) ({tools}) were refused with no "
+        f"one asked. The agent was told a user didn't want the action and to stop, "
+        f"but no prompt was ever shown, so the stage's work stopped there."
+    )
+    if woken:
+        report += (
+            " The session had ended its turn and was woken afterwards, most likely by "
+            "a background command finishing. By then its request stream had closed, "
+            "so nothing could answer its tool calls."
+        )
+    return report
 
 
 async def run_stage(
@@ -430,42 +489,71 @@ async def _run_session(
 
     session_id: str | None = None
     last_text = ""
-    result: ResultMessage | None = None
+    # One result per turn the session took, and it can take more than one: anything
+    # it left running in the background wakes it again after it ended its turn.
+    results: list[ResultMessage] = []
+    tool_names: dict[str, str] = {}
+    refused: list[str] = []
 
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, SystemMessage) and message.subtype == "init":
             session_id = message.data.get("session_id")
+            if results:
+                log(
+                    f"[{label}] WOKEN: this session ended its turn and has now started "
+                    f"another, so the stage was still running when it reported."
+                )
+                channel.emit("stage_woken", stage=stage_name, label=label, session_id=session_id)
             log(f"[{label}] session started: {session_id}")
             channel.emit("session_started", stage=stage_name, label=label, session_id=session_id)
         elif isinstance(message, UserMessage) and isinstance(message.content, list):
             for block in message.content:
                 _emit_block(block, stage_name, label)
+                # A sub-agent's refusal is its parent's to deal with, and the parent
+                # still has its tools. Only the stage's own thread is told to stop.
+                if message.parent_tool_use_id is None and _refused_unasked(block):
+                    refused.append(tool_names.get(block.tool_use_id, "unknown tool"))
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 # last_text tracks the final text only — it's the fallback
                 # summary handed to the next stage, and thinking is not a summary.
                 if isinstance(block, TextBlock) and block.text.strip():
                     last_text = block.text
+                elif isinstance(block, ToolUseBlock):
+                    tool_names[block.id] = block.name
                 line = _render_block(block, label)
                 if line is not None:
                     log(line)
                 _emit_block(block, stage_name, label)
         elif isinstance(message, ResultMessage):
-            result = message
+            results.append(message)
 
-    if result is not None:
-        session_id = result.session_id or session_id
-        summary = result.result or last_text or "(no summary produced)"
+    if results:
+        final = results[-1]
+        session_id = final.session_id or session_id
+        # Every turn's report, not just the last: the turn that did the work is not
+        # always the turn that ended the session.
+        summary = "\n\n".join(r.result for r in results if r.result)
+        summary = summary or last_text or "(no summary produced)"
+        is_error = any(r.is_error for r in results)
+        if refused:
+            is_error = True
+            report = _refusal_report(refused, woken=len(results) > 1)
+            log(f"[{label}] {report}")
+            summary = f"{report}\n\nWhat the session reported:\n\n{summary}"
         return StageResult(
             stage=stage_name,
             session_id=session_id,
             summary=summary,
-            is_error=result.is_error,
-            cost_usd=result.total_cost_usd,
-            num_turns=result.num_turns,
-            duration_ms=result.duration_ms,
+            is_error=is_error,
+            # The CLI's cost total runs across the whole session, while its turn and
+            # duration counts start over with each turn.
+            cost_usd=final.total_cost_usd,
+            num_turns=sum(r.num_turns or 0 for r in results),
+            duration_ms=sum(r.duration_ms or 0 for r in results),
             iteration=iteration,
             item=item,
+            segments=len(results),
         )
 
     return StageResult(

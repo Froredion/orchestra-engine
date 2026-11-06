@@ -32,10 +32,15 @@ start with a frontmatter block of stage options:
                          # starts from the request and the workspace alone).
                          # Use "none" when inheriting an earlier reading is the
                          # thing you are trying to prevent. It cannot decide.
+    produces: PLACE.md, plan.txt
+                         # documents this stage must leave in the artifacts
+                         # directory. One that is missing or empty when the stage
+                         # ends fails it and stops the run, whatever the session
+                         # reported.
     ---
 
-Paths in frontmatter (fan_out, skip_if) are relative to the run's artifacts
-directory, not the workspace — they name files an earlier stage wrote for the
+Paths in frontmatter (fan_out, skip_if, produces) are relative to the run's
+artifacts directory, not the workspace — they name files a stage writes for the
 engine to read.
 
 `redirect` is the exception: it names *authored* content rather than something
@@ -77,7 +82,7 @@ DEFAULT_HANDOFF_TEMPLATE = (Path(__file__).parent / "handoff.md").read_text(enco
 
 _STAGE_FILE_RE = re.compile(r"^\d+[-_](?P<name>.+)\.md$")
 _STAGE_OPTIONS = (
-    "repeat", "fan_out", "max_items", "handoff", "skip_if", "decide", "redirect",
+    "repeat", "fan_out", "max_items", "handoff", "skip_if", "decide", "redirect", "produces",
 )
 _HANDOFF_SCOPES = ("last", "all", "none")
 _SKIP_IF_SEPARATOR = " contains "
@@ -105,6 +110,8 @@ def stage_signature(stage: Stage) -> str:
         )
     if stage.decide_targets:
         label += f" [decides: may loop back to {', '.join(stage.decide_targets)}]"
+    if stage.produces:
+        label += f" [must leave {', '.join(stage.produces)}]"
     return label
 
 
@@ -501,6 +508,17 @@ def _parse_stage(name: str, text: str, source: Path) -> Stage:
         if loaded is not None:
             prompt, redirect_source = loaded
 
+    produces: tuple[str, ...] = ()
+    if "produces" in options:
+        produces = tuple(p.strip() for p in options["produces"].split(",") if p.strip())
+        if not produces:
+            raise ValueError(
+                f"{source}: produces must list at least one document, e.g. "
+                f"produces: PLAN.md, leads.txt"
+            )
+        for document in produces:
+            _check_artifacts_relative(document, "produces", source)
+
     return Stage(
         name=name,
         prompt_template=prompt,
@@ -512,6 +530,7 @@ def _parse_stage(name: str, text: str, source: Path) -> Stage:
         decide_targets=decide_targets,
         redirect=redirect,
         redirect_source=redirect_source,
+        produces=produces,
     )
 
 

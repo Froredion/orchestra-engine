@@ -648,6 +648,66 @@ def _log_stage_elapsed(log: Callable[[str], None], name: str, started: float) ->
     log(f"[{name}] stage finished in {elapsed} [{_wall_clock()}]")
 
 
+def _emit_stage_finished(
+    name: str, started: float, sessions: list[StageResult], final: StageResult
+) -> None:
+    """Tell the channel a stage is over, with what a driver would otherwise dig out
+    of the logs. Duration is the engine's own clock, so it covers everything the
+    stage took, including any time it spent waiting between turns."""
+    elapsed = time.monotonic() - started
+    channel.emit(
+        "stage_finished",
+        stage=name,
+        is_error=final.is_error,
+        duration_seconds=round(elapsed, 3),
+        duration_hms=format_duration(elapsed),
+        cost_usd=sum(r.cost_usd or 0 for r in sessions),
+        num_turns=sum(r.num_turns or 0 for r in sessions),
+        session_id=final.session_id,
+        summary=final.summary,
+    )
+
+
+def _missing_documents(stage: Stage, artifacts: Path) -> list[str]:
+    """Which of the documents this stage declares in `produces:` aren't there.
+
+    Empty counts as missing: a stage that opened the file and never wrote to it has
+    not left the document. Resolved before checking, like the other frontmatter
+    paths, so a symlink out of the artifacts directory doesn't count as leaving one.
+    """
+    root = artifacts.resolve()
+    missing = []
+    for name in stage.produces:
+        path = (artifacts / name).resolve()
+        try:
+            present = path.is_relative_to(root) and path.is_file() and path.stat().st_size > 0
+        except OSError:
+            present = False
+        if not present:
+            missing.append(name)
+    return missing
+
+
+def _failed_for_missing_documents(
+    stage: Stage, artifacts: Path, log: Callable[[str], None]
+) -> StageResult | None:
+    """The failure to record if this stage didn't leave what it declared, or None.
+
+    A later stage would otherwise start without its input, and the session's report
+    is no evidence either way: a stage that was stopped partway reports as calmly as
+    one that finished.
+    """
+    missing = _missing_documents(stage, artifacts)
+    if not missing:
+        return None
+    summary = (
+        f"STAGE FAILED: it did not leave {', '.join(missing)} in {artifacts}, which its "
+        f"`produces:` says it must."
+    )
+    log(f"[{stage.name}] {summary} Stopping the loop.")
+    return StageResult(stage=stage.name, session_id=None, summary=summary, is_error=True)
+
+
 def _sessions_root() -> Path:
     """Where Claude Code is writing session transcripts for this process.
 
@@ -1021,12 +1081,14 @@ async def run_loop(
                 )
                 break
             results.extend(stage_results)
+            missing = None if prev_candidate.is_error else _failed_for_missing_documents(stage, artifacts, log)
+            if missing:
+                results.append(missing)
             _log_stage_elapsed(log, stage.name, stage_started)
-            channel.emit(
-                "stage_finished", stage=stage.name, is_error=prev_candidate.is_error,
-                cost_usd=sum(r.cost_usd or 0 for r in stage_results),
-            )
+            _emit_stage_finished(stage.name, stage_started, stage_results, missing or prev_candidate)
             hops += 1
+            if missing:
+                break
             if prev_candidate.is_error:
                 log(f"[{stage.name}] every item failed — stopping the loop.")
                 break
@@ -1056,12 +1118,14 @@ async def run_loop(
                 log=log,
             )
             results.extend(chain)
+            missing = None if chain[-1].is_error else _failed_for_missing_documents(stage, artifacts, log)
+            if missing:
+                results.append(missing)
             _log_stage_elapsed(log, stage.name, stage_started)
-            channel.emit(
-                "stage_finished", stage=stage.name, is_error=chain[-1].is_error,
-                cost_usd=sum(r.cost_usd or 0 for r in chain),
-            )
+            _emit_stage_finished(stage.name, stage_started, chain, missing or chain[-1])
             hops += 1
+            if missing:
+                break
             if chain[-1].is_error:
                 log(f"[{stage.name}] stage errored — stopping the loop.")
                 break
@@ -1146,6 +1210,11 @@ async def run_loop(
             f"{quoted}\n"
             f"Full record: {artifacts / ESCALATIONS_FILE}"
         )
-    channel.emit("run_complete", run_dir=str(run_dir), escalations=bool(raised))
+    # A failed stage stops the run and it still ends here, so the ending has to say
+    # so: without it a driver reads "complete" and takes the run as delivered.
+    failed_stage = results[-1].stage if results and results[-1].is_error else None
+    channel.emit(
+        "run_complete", run_dir=str(run_dir), escalations=bool(raised), failed_stage=failed_stage
+    )
 
     return results

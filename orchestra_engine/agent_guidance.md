@@ -2,7 +2,7 @@
 
 Staged agent orchestration engine, at `{repo_root}`. Cross-platform (macOS/Linux/Windows). **Setup is one command on every OS: `python bootstrap.py`** — it creates `.venv` with whatever Python ran it and installs the engine editable; re-running is safe. **Launcher:** `./orchestra` on macOS/Linux, `orchestra` (or `.\orchestra`) on Windows — both just exec the module through the repo's venv, so `<venv-python> -m orchestra_engine` also works directly (`.venv/bin/python` on macOS/Linux, `.venv\Scripts\python.exe` on Windows). Run it against any repo via `--workspace`.
 
-A **pipeline** is just a folder of numbered prompt files (`01-plan.md`, `02-build.md`, …). The engine doesn't know what they mean — it runs them in filename order. Each stage is its own Claude Agent SDK session; when one finishes, its summary and session ID are handed to the next, so nothing is shared but that handoff and the files on disk. Frontmatter sets a stage's shape: `repeat: N`, `fan_out: FILE` (one parallel agent per line), `skip_if: FILE contains TEXT`, `decide: STAGE,...`. `./orchestra --list` describes the built-ins (it's the source of truth — the set grows); `UNDERSTANDING.md` explains the execution model from zero context.
+A **pipeline** is just a folder of numbered prompt files (`01-plan.md`, `02-build.md`, …). The engine doesn't know what they mean — it runs them in filename order. Each stage is its own Claude Agent SDK session; when one finishes, its summary and session ID are handed to the next, so nothing is shared but that handoff and the files on disk. Frontmatter sets a stage's shape: `repeat: N`, `fan_out: FILE` (one parallel agent per line), `skip_if: FILE contains TEXT`, `decide: STAGE,...`, `produces: FILE,...` (a document the stage must leave, or the run stops). `./orchestra --list` describes the built-ins (it's the source of truth — the set grows); `UNDERSTANDING.md` explains the execution model from zero context.
 
 ## This block is guidance for *you*, and never reaches the stages
 
@@ -23,9 +23,13 @@ Interactive mode (`-i`) is **not** terminal-only. Drive it with `--channel DIR`:
 ```sh
 C="$SCRATCH/chan-$(date +%s)"   # fresh dir per run; the engine refuses a reused one
 PYTHONUNBUFFERED=1 ./orchestra "task" -i --channel "$C" --workspace /path/to/repo --runs-dir "$SCRATCH/runs" > "$SCRATCH/run.log" 2>&1 &
-# Monitor tool: ./orchestra --watch --channel "$C"     (one line per event; exits when the run does)
+# Monitor tool: ./orchestra --watch --only-stages --channel "$C"     (one line per event; exits when the run does)
 # per prompt:   ./orchestra --channel "$C" --answer p3 1      (a number, an option's value, "1,3" for a checkbox, or text)
 ```
+
+`--only-stages` leaves out the per-message stream, which runs to a thousand lines or more; drop it to see every message. Re-arming a watch partway through a run? Add `--tail`, or it replays the run from the start: it says where the run stands, shows any prompt still waiting, and follows from there. A `STAGE … finished` line gives the duration, turns and cost with the summary quoted under it, and `events.jsonl` holds the whole summary. If you need the engine's process, read `DIR/engine.pid`: starting it through `orchestra.cmd` or `./orchestra` hands you the launcher's PID, not the engine's.
+
+**A stage can fail after its session says it succeeded.** `STAGE … finished [ERROR]` followed by `RUN stopped, stage … failed` means the run stopped there and what it owed was not delivered, even though the engine exits normally. Two causes are specific to that: a session whose tool calls were refused with nobody asked (the summary starts `STAGE FAILED`, usually after a `STAGE … WOKEN` line), and a missing `produces:` document. Tell the human, and resume with `--run-dir` and `--stages` once the cause is dealt with.
 
 `--answer` is refused unless its id is the prompt **actually waiting**, and refused for an out-of-range option — so a stale or mistyped reply fails loudly at your command instead of landing on the wrong question. That's the desync the old FIFO recipe had; don't go back to it. Each `PROMPT` line from `--watch` names its id, its kind (`gate` / `question` / `permission`) and the exact `--answer` command.
 

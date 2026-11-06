@@ -16,6 +16,20 @@ def no_app_window(monkeypatch):
 
 
 @pytest.fixture
+def symlink():
+    """Make a symlink, or skip where this account may not. On Windows that takes
+    Developer Mode or an elevated prompt: CI's runners have it, most desktops don't."""
+
+    def make(link, target):
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"can't create symlinks here: {exc}")
+
+    return make
+
+
+@pytest.fixture
 def research():
     return load_pipeline("research")
 

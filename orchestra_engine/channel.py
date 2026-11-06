@@ -2,6 +2,7 @@
 
     --channel DIR
     ├── events.jsonl   <- engine-written, append-only: one JSON object per line
+    ├── engine.pid     <- the engine's own PID, there while the channel is open
     └── answers/       <- one file per answered prompt, named for its id
 
 Before this, an agent driving a run read a scrolling log to find the prompt and
@@ -13,7 +14,12 @@ anything but the prompt now waiting is refused instead of consumed.
 The same file carries what a watcher wants without asking: stages starting and
 finishing, escalations as they are raised, the run ending. `--watch` turns it
 into one line per event, which is what a Monitor-style tool consumes, and exits
-when the run does.
+when the run does. `--only-stages` leaves out the per-message stream, and `--tail`
+starts from now rather than replaying the run, for a watcher that is re-armed.
+
+Starting the engine through a launcher (`orchestra.cmd`, `./orchestra`) gives the
+caller the launcher's PID, so engine.pid is where a driver finds the process that
+is actually running the stages.
 
 Why files and not Claude Code's cross-session messaging: a stage is a headless
 SDK session, which cannot be messaged and cannot send outside its own process,
@@ -38,7 +44,17 @@ from typing import Iterator
 
 EVENTS_FILE = "events.jsonl"
 ANSWERS_DIRNAME = "answers"
+PID_FILE = "engine.pid"
 POLL_SECONDS = 0.5
+
+# What `--only-stages` leaves out. Named by what is dropped rather than by what is
+# kept, so a kind of event added later shows up until someone decides it shouldn't:
+# a watcher missing a prompt or a failure costs more than one extra line. A real
+# run writes a thousand or more of these against a few dozen of everything else.
+SESSION_EVENTS = ("message", "session_started")
+
+# The events after which a run has nothing more to say.
+_FINAL_EVENTS = ("run_complete", "engine_exited")
 
 # Prompt kinds. A permission prompt is the human's to answer, never the driving
 # agent's; the kind is on the event so a driver can tell without parsing text.
@@ -96,12 +112,24 @@ def open_channel(directory: Path, forbidden: dict[str, Path]) -> "Channel":
     os.chmod(resolved, 0o700)
     os.chmod(resolved / ANSWERS_DIRNAME, 0o700)
     _active = Channel(resolved)
+    # Beside the event, not instead of it: the event is the record, and this is what
+    # a script reads without having to parse JSON. Written before the event, so a
+    # driver that has seen the event can rely on the file.
+    (resolved / PID_FILE).write_text(str(os.getpid()), encoding="utf-8")
     _active.emit("engine_started", pid=os.getpid())
     return _active
 
 
 def close_channel() -> None:
+    """Close the active channel and drop its PID file. The file goes when the engine
+    stops using the channel, so one left behind means the engine was killed; a stale
+    PID is worth not keeping around, since Windows reuses them quickly."""
     global _active
+    if _active is not None:
+        try:
+            (_active.dir / PID_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass  # a driver reading it on Windows holds it open; not worth failing a run
     _active = None
 
 
@@ -283,6 +311,31 @@ def _oneline(text: str) -> str:
     return " ".join(str(text).split())
 
 
+# Enough of a stage's summary for a watcher to decide whether to look further. The
+# event holds the whole of it, and run.json keeps it too.
+_SUMMARY_PREVIEW_CHARS = 300
+
+
+def _preview(text: str) -> str:
+    line = _oneline(text)
+    if len(line) <= _SUMMARY_PREVIEW_CHARS:
+        return line
+    return line[:_SUMMARY_PREVIEW_CHARS - 1] + "…"
+
+
+def _stage_facts(event: dict) -> str:
+    """How long a finished stage took and what it spent, for its watch line. Absent
+    on an event that doesn't carry them, and a stage skipped over has none."""
+    facts = []
+    if event.get("duration_hms"):
+        facts.append(f"in {event['duration_hms']}")
+    if event.get("num_turns"):
+        facts.append(f"{event['num_turns']} turns")
+    if event.get("cost_usd"):
+        facts.append(f"${event['cost_usd']:.2f}")
+    return f" {', '.join(facts)}" if facts else ""
+
+
 def render(event: dict, directory: Path) -> list[str]:
     """The watch lines for one event. Agent-written text is collapsed onto the
     event's own line or quoted with `  | `, so nothing a stage wrote can arrive
@@ -313,12 +366,23 @@ def render(event: dict, directory: Path) -> list[str]:
         return [f"STAGE {event['stage']} started"]
     if kind == "stage_finished":
         status = "ERROR" if event.get("is_error") else "ok"
-        return [f"STAGE {event['stage']} finished [{status}]"]
+        lines = [f"STAGE {event['stage']} finished [{status}]{_stage_facts(event)}"]
+        if event.get("summary"):
+            lines.append(f"  | {_preview(event['summary'])}")
+        return lines
+    if kind == "stage_woken":
+        return [
+            f"STAGE {event['stage']} WOKEN: its session ended its turn, then started "
+            f"another (session {event.get('session_id')})"
+        ]
     if kind == "run_started":
         return [f"RUN started: {event['run_dir']}"]
     if kind == "run_complete":
+        ending = f"RUN complete: {event['run_dir']}"
+        if event.get("failed_stage"):
+            ending = f"RUN stopped, stage {event['failed_stage']} failed: {event['run_dir']}"
         tail = " — escalations unresolved, see ESCALATIONS.md" if event.get("escalations") else ""
-        return [f"RUN complete: {event['run_dir']}{tail}"]
+        return [f"{ending}{tail}"]
     if kind == "engine_started":
         return [f"ENGINE started (pid {event['pid']})"]
     if kind == "engine_exited":
@@ -326,26 +390,71 @@ def render(event: dict, directory: Path) -> list[str]:
     return [f"{kind.upper()}: {_oneline(json.dumps(event))}"]
 
 
-def watch(directory: Path, poll: float = POLL_SECONDS) -> Iterator[str]:
+def _standing(events: list[dict], directory: Path) -> list[str]:
+    """Where a run stands, for a watcher that skips what already happened. It must
+    still hear about a prompt asked before it was armed: nothing will repeat it, and
+    the run is waiting on the answer."""
+    lines = [f"WATCH re-armed: skipped {len(events)} earlier event(s)"]
+    running = None
+    for event in events:
+        if event["event"] == "stage_started":
+            running = event["stage"]
+        elif event["event"] in ("stage_finished", "stage_skipped") and event["stage"] == running:
+            running = None
+    if running:
+        lines.append(f"STAGE {running} is running")
+    prompt = pending_prompt(events)
+    if prompt:
+        lines.extend(render(prompt, directory))
+    return lines
+
+
+def watch(
+    directory: Path,
+    poll: float = POLL_SECONDS,
+    only_stages: bool = False,
+    tail: bool = False,
+) -> Iterator[str]:
     """Yield watch lines as events land, ending when the run does — or when
     the engine process is gone, so a crashed run cannot leave a watcher open.
-    Waits for the events file to appear, so it can be armed before launch."""
+    Waits for the events file to appear, so it can be armed before launch.
+
+    only_stages leaves out the per-message stream (SESSION_EVENTS). tail starts from
+    now: instead of replaying what is already on file it says where the run stands,
+    which is what a watcher re-armed partway through a run wants. A run that has
+    already ended still gets its ending, so a watcher re-armed too late can stop.
+    """
     directory = directory.expanduser().resolve()
     seen = 0
     pid = None
+
+    def lines_for(event: dict) -> list[str]:
+        return [] if only_stages and event["event"] in SESSION_EVENTS else render(event, directory)
+
+    if tail:
+        events = read_events(directory)
+        if events:
+            yield from _standing(events, directory)
+            seen = len(events)
+        for event in events:
+            if event["event"] == "engine_started":
+                pid = event["pid"]
+            if event["event"] in _FINAL_EVENTS:
+                yield from render(event, directory)
+                return
     while True:
         events = read_events(directory)
         for event in events[seen:]:
             if event["event"] == "engine_started":
                 pid = event["pid"]
-            yield from render(event, directory)
-            if event["event"] in ("run_complete", "engine_exited"):
+            yield from lines_for(event)
+            if event["event"] in _FINAL_EVENTS:
                 return
         seen = len(events)
         if pid is not None and not _alive(pid):
             # One last read: the final event may have landed after the read above.
             for event in read_events(directory)[seen:]:
-                yield from render(event, directory)
+                yield from lines_for(event)
             yield "ENGINE gone without finishing the run (crashed or killed)"
             return
         time.sleep(poll)
