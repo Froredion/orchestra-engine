@@ -1,5 +1,6 @@
 """produces: a document a stage must leave, or the run stops there."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,18 @@ def test_parses_one_or_several_documents():
     assert _parse_stage("place", "body", SOURCE).produces == ()
 
 
-@pytest.mark.parametrize("value", ["../PLACE.md", "/etc/passwd", "C:x", "ok.md, ../bad.md"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "../PLACE.md",
+        "/etc/passwd",
+        "ok.md, ../bad.md",
+        pytest.param(
+            "C:x",
+            marks=pytest.mark.skipif(os.name != "nt", reason="only a rooted path on Windows"),
+        ),
+    ],
+)
 def test_a_path_out_of_the_artifacts_dir_is_refused_at_load(value):
     with pytest.raises(ValueError, match="produces must be a relative path"):
         _parse_stage("place", f"---\nproduces: {value}\n---\nbody", SOURCE)
