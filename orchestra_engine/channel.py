@@ -375,6 +375,12 @@ def render(event: dict, directory: Path) -> list[str]:
             f"STAGE {event['stage']} WOKEN: its session ended its turn, then started "
             f"another (session {event.get('session_id')})"
         ]
+    if kind == "stage_waiting":
+        commands = "; ".join(f"`{_oneline(command)}`" for command in event["commands"])
+        return [
+            f"STAGE {event['stage']} WAITING: its session ended its turn and left {commands} "
+            f"running. It fails in {event['limit_seconds']:g} s if that's still so"
+        ]
     if kind == "run_started":
         return [f"RUN started: {event['run_dir']}"]
     if kind == "run_complete":

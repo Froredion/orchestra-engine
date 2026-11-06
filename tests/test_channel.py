@@ -217,12 +217,14 @@ def test_only_stages_keeps_everything_a_driver_acts_on(chan):
     chan.emit("prompt", id="p1", kind="permission", mode="select", message="Allow?", options=[], allow_back=False)
     chan.emit("escalation", text="dropped case A")
     chan.emit("stage_woken", stage="plan", label="plan", session_id="s1")
+    chan.emit("stage_waiting", stage="plan", label="plan", commands=["npm run dev"], limit_seconds=600.0)
     chan.emit("run_complete", run_dir="/r", escalations=True)
     lines = list(channel.watch(chan.dir, poll=0.01, only_stages=True))
     assert any(line.startswith("PROMPT p1") for line in lines)
     assert any("permission prompt" in line for line in lines)
     assert "  | dropped case A" in lines
     assert any(line.startswith("STAGE plan WOKEN") for line in lines)
+    assert any(line.startswith("STAGE plan WAITING") and "`npm run dev`" in line and "600 s" in line for line in lines)
 
 
 def test_tail_starts_from_now(chan):

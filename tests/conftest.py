@@ -1,6 +1,8 @@
 import asyncio
+import inspect
 
 import pytest
+from claude_agent_sdk import CLIConnectionError, ResultMessage
 
 from orchestra_engine.pipeline import load_pipeline
 
@@ -133,3 +135,71 @@ def stub(monkeypatch):
         return run_chain
 
     return _stub
+
+
+class ScriptedClient:
+    """Stands in for ClaudeSDKClient: plays its frames, then does what the CLI does and
+    stays parked until its stdin closes. A frame that's an async function runs instead
+    of being sent, for what can only happen once the engine has done something."""
+
+    def __init__(self, frames, options):
+        self.frames = frames
+        self.options = options
+        self.prompts = []
+        self.stopped = []
+        self.stop_requested = asyncio.Event()
+        self.stdin_closed = asyncio.Event()
+        self.disconnected = False
+        self._feed = None
+
+    async def connect(self, prompt):
+        self.prompts.append(await anext(prompt))
+
+        async def feed():
+            # Ending the stream is when the SDK closes stdin. It's a little more
+            # involved than this for a session with hooks, but never earlier.
+            async for message in prompt:
+                self.prompts.append(message)
+            self.stdin_closed.set()
+
+        self._feed = asyncio.ensure_future(feed())
+
+    async def receive_messages(self):
+        for frame in self.frames:
+            if inspect.iscoroutinefunction(frame):
+                await frame(self)
+            else:
+                yield frame
+        # A session that never reported is a CLI that died: its stream just ends.
+        if any(isinstance(frame, ResultMessage) for frame in self.frames):
+            await self.stdin_closed.wait()
+
+    async def stop_task(self, task_id):
+        if self.stdin_closed.is_set():
+            raise CLIConnectionError("ProcessTransport is not ready for writing")
+        self.stopped.append(task_id)
+        self.stop_requested.set()
+
+    async def disconnect(self):
+        self.disconnected = True
+        if self._feed is not None:
+            self._feed.cancel()
+
+
+@pytest.fixture
+def script_sessions(monkeypatch):
+    """Sessions play these frames instead of starting a CLI. Returns the clients made
+    so far, which grows as sessions start."""
+    from orchestra_engine.engine import session
+
+    def install(*frames):
+        clients = []
+
+        def make(options):
+            clients.append(ScriptedClient(frames, options))
+            return clients[-1]
+
+        monkeypatch.setattr(session, "ClaudeSDKClient", make)
+        return clients
+
+    return install

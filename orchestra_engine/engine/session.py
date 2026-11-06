@@ -9,22 +9,29 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
+from contextlib import aclosing
 from pathlib import Path
-from typing import Callable
+from typing import AsyncIterator, Callable
 
 from claude_agent_sdk import (
+    TERMINAL_TASK_STATUSES,
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     HookMatcher,
+    Message,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
     create_sdk_mcp_server,
-    query,
     tool,
 )
 
@@ -217,8 +224,9 @@ Ending your turn ends this stage. The message you send without a tool call is yo
 report, and the run moves on. So don't end your turn until the stage's work is
 done, and never end it to wait: not on "waiting for X to start", and not on a
 background command or a notification you expect to wake you. A session woken that
-way can't use its tools. Its calls come back refused as if someone had said no,
-when nobody was asked, and the stage fails.
+way can find its calls refused as if someone had said no, when nobody was asked,
+and a command still running some minutes after your turn ends gets stopped. Either
+way the stage fails.
 
 To wait for something, stay in your turn and run one foreground shell command that
 blocks until it is true, such as `until <check>; do sleep 2; done`, with a timeout
@@ -258,9 +266,15 @@ instead of guessing. Keep questions short and concrete.
 DEFAULT_SETTING_SOURCES = ("project",)
 
 
-def _streaming_prompt(prompt: str):
+def _streaming_prompt(prompt: str, release: asyncio.Event):
+    """The prompt as a stream that stays open until `release` is set. The SDK won't
+    close the session's stdin while the stream is open, and once it ends the SDK
+    decides as it always did: at once, or when the run is over if something still
+    needs answering. See _ShellWait for why the engine holds it."""
+
     async def gen():
         yield {"type": "user", "message": {"role": "user", "content": prompt}}
+        await release.wait()
 
     return gen()
 
@@ -306,12 +320,43 @@ RETRY_BACKOFF_SECONDS = 2
 # the session for another turn. Permission requests and hooks both travel over
 # that stdin, so in an interactive stage every tool call of the woken turn, a plain
 # Read included, is refused within milliseconds with no prompt shown. The agent
-# obeys and stops, and the CLI reports success.
+# obeys and stops, and the CLI reports success. _ShellWait now keeps stdin open
+# through that sequence, so this is what's left for a wake it couldn't hold for.
 #
 # A second session start alone doesn't mean this. A background sub-agent wakes the
 # session the same way, but the SDK holds stdin open for it and its follow-up turn
 # works, so the refusal is what fails a stage, not the wake.
 UNASKED_REFUSAL = "The user doesn't want to take this action right now"
+
+# How long a session may sit after ending its turn with only background commands
+# running, before the engine stops them and fails the stage. Set the variable in the
+# engine's own environment to change it.
+#
+# The CLI doesn't bound that wait in any useful way. Seen live, it holds the session
+# for as long as the command runs and sends nothing at all, and BG_WAIT_ENV doesn't
+# apply: at 30 s, a dev server still held the session for 30 minutes. A background
+# shell has its own deadline, the `timeout` the agent gave it or 30 minutes, and the
+# ceiling only counts once that has passed. At the deadline the CLI kills the command,
+# wakes the session and tells it to start the command again with a longer timeout if
+# it still needs it. Most did, with the two-hour maximum. So a run can sit silent for
+# hours, looking exactly like a slow one.
+SHELL_WAIT_ENV = "ORCHESTRA_SHELL_WAIT_SECONDS"
+SHELL_WAIT_DEFAULT_SECONDS = 600.0
+
+# A command or an agent ending usually wakes the session for another turn, and that
+# turn needs stdin. Not every ending does, though, and then nothing else arrives to
+# go on. So this is how long the engine waits for the turn before deciding without it.
+SHELL_SETTLE_SECONDS = 15.0
+
+# How long the CLI gets to exit after the engine stops its commands, before the SDK
+# terminates it.
+SESSION_EXIT_GRACE_SECONDS = 30.0
+
+# What a command's task type is, and the ones that reach an end and wake the session
+# when they do (the SDK's DEFERRING_TASK_TYPES). The CLI reports other kinds of task
+# too, some of them its own housekeeping, and none of those change anything here.
+SHELL_TASK_TYPE = "local_bash"
+AGENT_TASK_TYPES = ("local_agent", "local_workflow")
 
 # The SDK caps a single JSON message at 1MB, which a fan-out agent reading a
 # large artifact blows past — taking the whole run with it. Agents crawl PDFs
@@ -358,6 +403,208 @@ def _refusal_report(refused: list[str], woken: bool) -> str:
             "so nothing could answer its tool calls."
         )
     return report
+
+
+def _shell_wait_seconds() -> float:
+    """SHELL_WAIT_ENV as a number of seconds. A typo falls back to the default rather
+    than taking the run down or turning the limit off."""
+    raw = os.environ.get(SHELL_WAIT_ENV)
+    if raw is None:
+        return SHELL_WAIT_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return SHELL_WAIT_DEFAULT_SECONDS
+    return seconds if 0 <= seconds < float("inf") else SHELL_WAIT_DEFAULT_SECONDS
+
+
+class _ShellWait:
+    """Watches the session's background commands, and stops one it left running.
+
+    Ending the session from out here isn't enough. Terminating the CLI on Windows
+    leaves the command running, still holding whatever it holds, such as a port. The
+    clean way out is the SDK's stop_task: the CLI kills the command and can exit. That
+    goes over the session's stdin, which the SDK closes as soon as a turn ends if it's
+    left to it. So the engine holds the prompt stream open past a turn that left only
+    background commands running. A command that finishes in time then wakes a session
+    whose tools still work, which is the other thing the closed stdin used to break.
+
+    Background agents are left to the SDK and the CLI, as they always were: they reach
+    an end, wake the session when they do and fall under BG_WAIT_ENV. So stdin is
+    released for them, and the clock only runs for a command with no agent still
+    working, since the agent may be using it. If a command then outlasts the agent's
+    follow-up turn, stdin can be gone and stop_task with it. The session is ended
+    anyway, and the report says the command may still be running.
+    """
+
+    def __init__(self, stage: str, label: str, log: Callable[[str], None]) -> None:
+        self.stage = stage
+        self.label = label
+        self.log = log
+        self.limit = _shell_wait_seconds()
+        self.release = asyncio.Event()
+        self.left_running: list[str] = []
+        self.not_stopped: list[str] = []
+        self._commands: dict[str, str] = {}
+        self._running: dict[str, TaskStartedMessage] = {}
+        self._left_since: dict[str, float] = {}
+        self._between_turns = False
+        self._settle_at: float | None = None
+        self._exit_by: float | None = None
+
+    def saw(self, message: Message) -> None:
+        if isinstance(message, TaskStartedMessage):
+            self._running[message.task_id] = message
+        elif isinstance(message, TaskNotificationMessage):
+            self._ended(message.task_id)
+        elif isinstance(message, TaskUpdatedMessage):
+            if message.status in TERMINAL_TASK_STATUSES:
+                self._ended(message.task_id)
+        elif isinstance(message, ResultMessage):
+            self._turn_ended()
+        elif isinstance(message, SystemMessage):
+            if message.subtype == "init":
+                self._turn_started()
+        elif isinstance(message, (AssistantMessage, UserMessage)):
+            # A background agent's own messages come through between the session's turns.
+            if message.parent_tool_use_id is None:
+                self._turn_started()
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    # Bash, PowerShell and Monitor all report as a shell.
+                    if isinstance(block, ToolUseBlock):
+                        self._commands[block.id] = _tool_detail(block.input, limit=200)
+
+    def next_look(self) -> float | None:
+        """When act() next has something to do, or None if only a frame can change that."""
+        if self._exit_by is not None:
+            return self._exit_by
+        if not self._between_turns:
+            return None
+        if self._settle_at is not None:
+            return self._settle_at
+        if self._left_since and not self._agents():
+            return min(self._left_since.values()) + self.limit
+        return None
+
+    async def act(self, client: ClaudeSDKClient) -> bool:
+        """Do what next_look() was for. True means stop waiting for the CLI to exit."""
+        if self._exit_by is not None:
+            return True
+        if self._settle_at is not None:
+            self._settle_at = None
+            self._decide()
+            return False
+        for task in self._shells():
+            name = self._name(task)
+            self.left_running.append(name)
+            self.log(f"[{self.label}] STOPPING `{name}`: still running {self.limit:g} s after the session's turn ended.")
+            try:
+                await client.stop_task(task.task_id)
+            except Exception as exc:
+                self.not_stopped.append(name)
+                self.log(f"[{self.label}] couldn't stop `{name}` ({type(exc).__name__}: {exc})")
+        self.release.set()
+        self._exit_by = time.monotonic() + SESSION_EXIT_GRACE_SECONDS
+        return False
+
+    def report(self) -> str:
+        """Why the stage is being failed, for the run log and the channel: the session's
+        own last message usually says everything went fine."""
+        commands = "; ".join(f"`{name}`" for name in self.left_running)
+        report = (
+            f"STAGE FAILED: its session ended its turn and left {len(self.left_running)} "
+            f"background command(s) running: {commands}. They were still going {self.limit:g} s "
+            f"later, so the engine ended the session rather than let the run sit on them."
+        )
+        if self.not_stopped:
+            names = "; ".join(f"`{name}`" for name in self.not_stopped)
+            report += (
+                f" It couldn't stop {names}, and ending a session doesn't always end its "
+                f"commands, so check whether that's still running."
+            )
+        else:
+            report += " It stopped them first, so anything that needed them has lost them."
+        return (
+            f"{report} A stage has to finish or stop what it starts, or wait for it with a "
+            f"foreground command. {SHELL_WAIT_ENV} sets how long the engine gives them."
+        )
+
+    def _ended(self, task_id: str) -> None:
+        self._running.pop(task_id, None)
+        self._left_since.pop(task_id, None)
+        if self._between_turns:
+            self._settle_at = time.monotonic() + SHELL_SETTLE_SECONDS
+
+    def _turn_started(self) -> None:
+        self._between_turns = False
+        self._settle_at = None
+
+    def _turn_ended(self) -> None:
+        self._between_turns = True
+        self._settle_at = None
+        self._decide()
+
+    def _decide(self) -> None:
+        """The session is between turns: let it go, or start the clock on what it left."""
+        if not self._shells() or self._agents():
+            self._left_since.clear()
+            self.release.set()
+            return
+        now = time.monotonic()
+        # Not restarted for a command that's already waiting: the CLI can wake the
+        # session just to check on one, and that shouldn't buy the command more time.
+        new = [task for task in self._shells() if task.task_id not in self._left_since]
+        self._left_since.update((task.task_id, now) for task in new)
+        if new:
+            names = [self._name(task) for task in new]
+            listed = "; ".join(f"`{name}`" for name in names)
+            self.log(
+                f"[{self.label}] WAITING: this session ended its turn with background command(s) "
+                f"still running: {listed}. They get {self.limit:g} s, then the engine stops them "
+                f"and fails the stage."
+            )
+            channel.emit(
+                "stage_waiting", stage=self.stage, label=self.label, commands=names, limit_seconds=self.limit
+            )
+
+    def _shells(self) -> list[TaskStartedMessage]:
+        return [task for task in self._running.values() if task.task_type == SHELL_TASK_TYPE]
+
+    def _agents(self) -> list[TaskStartedMessage]:
+        return [task for task in self._running.values() if task.task_type in AGENT_TASK_TYPES]
+
+    def _name(self, task: TaskStartedMessage) -> str:
+        return self._commands.get(task.tool_use_id or "") or task.description
+
+
+async def _session_frames(client: ClaudeSDKClient, wait: _ShellWait) -> AsyncIterator[Message]:
+    """The session's frames until the CLI exits, with _ShellWait shown each one and
+    given its turn when nothing arrives in time. The read stays pending across a
+    timeout, since cancelling it would end the SDK's stream."""
+    frames = client.receive_messages()
+    pending: asyncio.Future | None = None
+    try:
+        while True:
+            pending = pending or asyncio.ensure_future(anext(frames))
+            look_at = wait.next_look()
+            timeout = None if look_at is None else max(0.0, look_at - time.monotonic())
+            done, _ = await asyncio.wait({pending}, timeout=timeout)
+            if not done:
+                if await wait.act(client):
+                    return
+                continue
+            try:
+                message = pending.result()
+            except StopAsyncIteration:
+                pending = None
+                return
+            pending = None
+            wait.saw(message)
+            yield message
+    finally:
+        if pending is not None:
+            pending.cancel()
 
 
 async def run_stage(
@@ -440,8 +687,8 @@ async def _run_session(
     handoff_body: str | None = None,
 ) -> StageResult:
     """One attempt at a session. Prompt and options are built per call — the
-    interactive path wraps the prompt in a single-use async generator, so a
-    retry that reused them would send an already-exhausted stream."""
+    prompt is wrapped in a single-use async generator, so a retry that reused
+    them would send an already-exhausted stream."""
     prompt = WORKSPACE_PREAMBLE.format(
         workspace=workspace, artifacts=artifacts, escalations=ESCALATIONS_FILE
     ) + prompt
@@ -485,8 +732,8 @@ async def _run_session(
         options.hooks = {
             "PreToolUse": [HookMatcher(matcher=None, hooks=[interaction.keep_stream_open])]
         }
-        prompt = _streaming_prompt(prompt)
 
+    wait = _ShellWait(stage_name, label, log)
     session_id: str | None = None
     last_text = ""
     # One result per turn the session took, and it can take more than one: anything
@@ -495,38 +742,44 @@ async def _run_session(
     tool_names: dict[str, str] = {}
     refused: list[str] = []
 
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, SystemMessage) and message.subtype == "init":
-            session_id = message.data.get("session_id")
-            if results:
-                log(
-                    f"[{label}] WOKEN: this session ended its turn and has now started "
-                    f"another, so the stage was still running when it reported."
-                )
-                channel.emit("stage_woken", stage=stage_name, label=label, session_id=session_id)
-            log(f"[{label}] session started: {session_id}")
-            channel.emit("session_started", stage=stage_name, label=label, session_id=session_id)
-        elif isinstance(message, UserMessage) and isinstance(message.content, list):
-            for block in message.content:
-                _emit_block(block, stage_name, label)
-                # A sub-agent's refusal is its parent's to deal with, and the parent
-                # still has its tools. Only the stage's own thread is told to stop.
-                if message.parent_tool_use_id is None and _refused_unasked(block):
-                    refused.append(tool_names.get(block.tool_use_id, "unknown tool"))
-        elif isinstance(message, AssistantMessage):
-            for block in message.content:
-                # last_text tracks the final text only — it's the fallback
-                # summary handed to the next stage, and thinking is not a summary.
-                if isinstance(block, TextBlock) and block.text.strip():
-                    last_text = block.text
-                elif isinstance(block, ToolUseBlock):
-                    tool_names[block.id] = block.name
-                line = _render_block(block, label)
-                if line is not None:
-                    log(line)
-                _emit_block(block, stage_name, label)
-        elif isinstance(message, ResultMessage):
-            results.append(message)
+    client = ClaudeSDKClient(options)
+    await client.connect(_streaming_prompt(prompt, wait.release))
+    try:
+        async with aclosing(_session_frames(client, wait)) as frames:
+            async for message in frames:
+                if isinstance(message, SystemMessage) and message.subtype == "init":
+                    session_id = message.data.get("session_id")
+                    if results:
+                        log(
+                            f"[{label}] WOKEN: this session ended its turn and has now started "
+                            f"another, so the stage was still running when it reported."
+                        )
+                        channel.emit("stage_woken", stage=stage_name, label=label, session_id=session_id)
+                    log(f"[{label}] session started: {session_id}")
+                    channel.emit("session_started", stage=stage_name, label=label, session_id=session_id)
+                elif isinstance(message, UserMessage) and isinstance(message.content, list):
+                    for block in message.content:
+                        _emit_block(block, stage_name, label)
+                        # A sub-agent's refusal is its parent's to deal with, and the parent
+                        # still has its tools. Only the stage's own thread is told to stop.
+                        if message.parent_tool_use_id is None and _refused_unasked(block):
+                            refused.append(tool_names.get(block.tool_use_id, "unknown tool"))
+                elif isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        # last_text tracks the final text only — it's the fallback
+                        # summary handed to the next stage, and thinking is not a summary.
+                        if isinstance(block, TextBlock) and block.text.strip():
+                            last_text = block.text
+                        elif isinstance(block, ToolUseBlock):
+                            tool_names[block.id] = block.name
+                        line = _render_block(block, label)
+                        if line is not None:
+                            log(line)
+                        _emit_block(block, stage_name, label)
+                elif isinstance(message, ResultMessage):
+                    results.append(message)
+    finally:
+        await client.disconnect()
 
     if results:
         final = results[-1]
@@ -539,6 +792,11 @@ async def _run_session(
         if refused:
             is_error = True
             report = _refusal_report(refused, woken=len(results) > 1)
+            log(f"[{label}] {report}")
+            summary = f"{report}\n\nWhat the session reported:\n\n{summary}"
+        if wait.left_running:
+            is_error = True
+            report = wait.report()
             log(f"[{label}] {report}")
             summary = f"{report}\n\nWhat the session reported:\n\n{summary}"
         return StageResult(

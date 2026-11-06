@@ -8,6 +8,7 @@ session. In an interactive stage every tool call of that turn is then refused in
 milliseconds, with no prompt shown, and the CLI reports success.
 """
 
+import asyncio
 import json
 import mmap
 from pathlib import Path
@@ -18,6 +19,9 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
+    TaskUpdatedMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -71,29 +75,31 @@ def background_wait():
     ]
 
 
-def scripted(*frames):
-    def fake_query(prompt, options):
-        async def stream():
-            for frame in frames:
-                yield frame
+@pytest.fixture
+def play(run, script_sessions, tmp_path):
+    """Run one session over these frames; returns (result, log lines, its client). The
+    timeout turns a session the engine never let go of into a failure, not a hung suite."""
 
-        return stream()
+    def _play(*frames, interactive=True):
+        clients = script_sessions(*frames)
+        lines = []
+        outcome = run(
+            asyncio.wait_for(
+                session.run_stage(
+                    "place", "p", tmp_path / "ws", tmp_path / "a", interactive=interactive, log=lines.append
+                ),
+                timeout=10,
+            )
+        )
+        return outcome, lines, clients[0]
 
-    return fake_query
+    return _play
 
 
 @pytest.fixture
-def stage(run, monkeypatch, tmp_path):
-    """Run one session over these frames; returns (result, log lines)."""
-
+def stage(play):
     def _run(*frames):
-        monkeypatch.setattr(session, "query", scripted(*frames))
-        lines = []
-        outcome = run(
-            session.run_stage(
-                "place", "p", tmp_path / "ws", tmp_path / "a", interactive=True, log=lines.append
-            )
-        )
+        outcome, lines, _ = play(*frames)
         return outcome, lines
 
     return _run
@@ -248,23 +254,16 @@ def test_the_bundled_cli_still_says_what_the_engine_listens_for():
         assert data.find(session.UNASKED_REFUSAL.encode()) != -1
 
 
-def test_the_run_stops_at_a_refused_stage_and_says_so(run, monkeypatch, tmp_path):
+def test_the_run_stops_at_a_refused_stage_and_says_so(run, script_sessions, tmp_path):
     """The whole path from the trial: nothing after the stage runs, and everything a
     driver reads says it failed."""
-    frames = [
+    clients = script_sessions(
         *background_wait(),
         init(),
         calls("t2", "Bash", command="mkdir out"),
         answered("t2", REFUSAL, is_error=True),
         result("It was rejected.", turns=2, ms=9_500, cost=0.75),
-    ]
-    prompts = []
-
-    def fake_query(prompt, options):
-        prompts.append(prompt)
-        return scripted(*frames)(prompt, options)
-
-    monkeypatch.setattr(session, "query", fake_query)
+    )
     pipeline = Pipeline(
         name="t",
         stages=(Stage(name="place", prompt_template="{task}"), Stage(name="system", prompt_template="{task}")),
@@ -282,7 +281,7 @@ def test_the_run_stops_at_a_refused_stage_and_says_so(run, monkeypatch, tmp_path
     finally:
         channel.close_channel()
 
-    assert len(prompts) == 1, "the next stage must not start"
+    assert len(clients) == 1, "the next stage must not start"
     assert [r.stage for r in results] == ["place"] and results[0].is_error
 
     kinds = [e["event"] for e in events]
@@ -298,3 +297,413 @@ def test_the_run_stops_at_a_refused_stage_and_says_so(run, monkeypatch, tmp_path
     logged = json.loads(log_file.read_text(encoding="utf-8"))["stages"][0]
     assert logged["is_error"] is True
     assert (logged["num_turns"], logged["duration_ms"], logged["segments"]) == (4, 129_500, 2)
+
+
+# A session that ends its turn with a background command still running. The CLI sends
+# nothing at all while it holds the session, so these frames are all there is to go on.
+# They're what a real session produced, like the ones above.
+
+SERVER = "python -m http.server 8000"
+TICK = 0.05
+
+
+def background_task(task_id, tool_id, task_type="local_bash"):
+    return TaskStartedMessage(
+        subtype="task_started", data={}, task_id=task_id, description=f"the {task_id} task",
+        uuid="u", session_id=SID, tool_use_id=tool_id, task_type=task_type,
+    )
+
+
+def task_ended(task_id, status="completed"):
+    return TaskNotificationMessage(
+        subtype="task_notification", data={}, task_id=task_id, status=status,
+        output_file="out", summary="s", uuid="u", session_id=SID,
+    )
+
+
+def task_updated(task_id, status):
+    return TaskUpdatedMessage(
+        subtype="task_updated", data={}, task_id=task_id, patch={"status": status}, status=status,
+    )
+
+
+def left_a_server():
+    return [
+        init(),
+        calls("t1", "Bash", command=SERVER, run_in_background=True),
+        background_task("b1", "t1"),
+        answered("t1", "Command running in background with ID: b1."),
+        says("Dev server started."),
+        result("Dev server started.", turns=2, ms=5_000, cost=0.01),
+    ]
+
+
+async def until_stopped(client):
+    await client.stop_requested.wait()
+
+
+async def until_stdin_closes(client):
+    await asyncio.wait_for(client.stdin_closed.wait(), timeout=1)
+
+
+async def stdin_still_open(client):
+    assert not client.stdin_closed.is_set()
+
+
+async def longer_than_the_limit(client):
+    await asyncio.sleep(TICK * 4)
+
+
+async def never(client):
+    await asyncio.Event().wait()
+
+
+@pytest.fixture
+def short_limit(monkeypatch):
+    monkeypatch.setenv(session.SHELL_WAIT_ENV, str(TICK))
+
+
+def test_a_command_left_running_is_stopped_and_fails_the_stage(play, short_limit):
+    outcome, lines, client = play(
+        *left_a_server(),
+        until_stopped,
+        task_updated("b1", "killed"),
+        task_ended("b1", "stopped"),
+    )
+    assert client.stopped == ["b1"], "stopped through the CLI, which ending the session doesn't do"
+    assert outcome.is_error, "the CLI said success, and the stage's command is gone"
+    assert outcome.summary.startswith("STAGE FAILED")
+    assert f"`{SERVER}`" in outcome.summary, "it has to say which command"
+    assert session.SHELL_WAIT_ENV in outcome.summary, "and how to give it longer"
+    assert "Dev server started." in outcome.summary, "the session's own account stays"
+    assert "It stopped them first" in outcome.summary
+    assert "couldn't stop" not in outcome.summary
+    assert client.stdin_closed.is_set() and client.disconnected
+    assert any(line.startswith("[place] STOPPING") and SERVER in line for line in lines)
+
+
+def test_the_wait_is_announced_when_it_starts_not_when_it_ends(play, short_limit, tmp_path):
+    """A stalled run looks like a slow one unless something says otherwise."""
+    chan = channel.open_channel(tmp_path / "chan", forbidden={})
+    try:
+        _, lines, _ = play(*left_a_server(), until_stopped, task_ended("b1", "stopped"))
+        events = channel.read_events(chan.dir)
+    finally:
+        channel.close_channel()
+
+    waiting = next(e for e in events if e["event"] == "stage_waiting")
+    assert waiting["stage"] == "place"
+    assert waiting["commands"] == [SERVER]
+    assert waiting["limit_seconds"] == TICK
+    said = [line for line in lines if "WAITING" in line or "STOPPING" in line]
+    assert "WAITING" in said[0] and SERVER in said[0]
+    assert "STOPPING" in said[1]
+
+
+@pytest.mark.parametrize(
+    "tool, tool_input",
+    [
+        ("Bash", {"command": SERVER, "description": "Start the server"}),
+        ("PowerShell", {"command": SERVER, "description": "Start the server"}),
+        ("Monitor", {"command": SERVER, "description": "Watch the server"}),
+    ],
+)
+def test_the_report_names_the_command_whichever_tool_started_it(play, short_limit, tool, tool_input):
+    outcome, _, _ = play(
+        init(),
+        calls("t1", tool, **tool_input),
+        background_task("b1", "t1"),
+        answered("t1", "Running in the background."),
+        result("Started.", turns=2, ms=1_000, cost=0.01),
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert f"`{SERVER}`" in outcome.summary
+
+
+def test_a_command_with_no_tool_call_to_go_on_is_named_by_its_description(play, short_limit):
+    outcome, _, _ = play(
+        init(),
+        background_task("b1", "t1"),
+        result("Started.", turns=2, ms=1_000, cost=0.01),
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert "`the b1 task`" in outcome.summary
+
+
+def test_a_command_that_finishes_in_time_wakes_a_turn_that_can_still_answer(play):
+    """stdin stays open across the wait. A closed one is what got every tool call of the
+    woken turn refused, with no prompt shown."""
+    outcome, lines, client = play(
+        *left_a_server(),
+        stdin_still_open,
+        task_updated("b1", "completed"),
+        task_ended("b1"),
+        stdin_still_open,
+        init(),
+        calls("t2", "Read", file_path="out.log"),
+        stdin_still_open,
+        answered("t2", "all good"),
+        result("The server exited cleanly.", turns=2, ms=2_000, cost=0.02),
+        until_stdin_closes,
+    )
+    assert not outcome.is_error
+    assert outcome.segments == 2
+    assert client.stopped == []
+    assert any("WOKEN" in line for line in lines)
+
+
+def test_nothing_holds_the_session_past_a_turn_with_nothing_running(play):
+    outcome, lines, client = play(
+        init(),
+        says("All done."),
+        result("All done.", turns=2, ms=1_000, cost=0.01),
+        until_stdin_closes,
+    )
+    assert not outcome.is_error
+    assert client.stopped == []
+    assert not any("WAITING" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        pytest.param([task_ended("b1")], id="finished by itself"),
+        pytest.param([task_updated("b1", "killed")], id="killed, with no notification"),
+        pytest.param([task_updated("b1", "killed"), task_ended("b1", "stopped")], id="both frames"),
+    ],
+)
+def test_a_command_over_before_the_turn_ends_is_no_reason_to_wait(play, ending):
+    """Foreground commands report like this too, and so does one the agent stopped."""
+    outcome, lines, client = play(
+        init(),
+        calls("t1", "Bash", command="sleep 2", run_in_background=True),
+        background_task("b1", "t1"),
+        answered("t1", "Command running in background with ID: b1."),
+        *ending,
+        result("Done.", turns=2, ms=1_000, cost=0.01),
+        until_stdin_closes,
+    )
+    assert not outcome.is_error
+    assert client.stopped == []
+    assert not any("WAITING" in line for line in lines)
+
+
+def test_a_status_that_is_not_an_ending_changes_nothing(play, short_limit):
+    outcome, _, client = play(
+        *left_a_server()[:3],
+        task_updated("b1", "running"),
+        answered("t1", "Command running in background with ID: b1."),
+        result("Dev server started.", turns=2, ms=5_000, cost=0.01),
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert client.stopped == ["b1"]
+    assert outcome.is_error
+
+
+def test_a_command_that_ends_with_no_wake_lets_the_session_go(play, monkeypatch):
+    """Not every ending wakes the session, and nothing else would release stdin."""
+    monkeypatch.setattr(session, "SHELL_SETTLE_SECONDS", TICK)
+    outcome, _, client = play(*left_a_server(), task_ended("b1"))
+    assert not outcome.is_error
+    assert client.stopped == []
+    assert client.stdin_closed.is_set()
+
+
+def test_a_turn_under_way_is_not_cut_off_and_being_woken_buys_no_more_time(play, short_limit):
+    """The CLI can wake a session just to check on a command. The command's clock keeps
+    running from the turn that left it, and only takes effect between turns."""
+    seen = {}
+
+    async def not_stopped_yet(client):
+        seen["stopped_during_the_turn"] = list(client.stopped)
+
+    outcome, _, client = play(
+        *left_a_server(),
+        init(),
+        longer_than_the_limit,
+        not_stopped_yet,
+        says("It's a server, so I'll leave it."),
+        result("It's a server, so I'll leave it.", turns=1, ms=1_000, cost=0.02),
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert seen["stopped_during_the_turn"] == []
+    assert client.stopped == ["b1"]
+    assert outcome.is_error
+
+
+def test_a_background_agent_is_left_to_the_sdk(play, short_limit):
+    """The SDK and the CLI hold the session for it, and the agent may be using the
+    server, so neither gets touched however long the agent takes. This is what
+    BG_WAIT_DEFAULT_MS is for."""
+    outcome, lines, client = play(
+        init(),
+        calls("t1", "Bash", command=SERVER, run_in_background=True),
+        background_task("b1", "t1"),
+        answered("t1", "Command running in background with ID: b1."),
+        calls("t2", "Agent", prompt="test the server", run_in_background=True),
+        background_task("a1", "t2", task_type="local_agent"),
+        answered("t2", "Async agent launched successfully."),
+        result("Waiting for the agent.", turns=3, ms=2_000, cost=0.01),
+        until_stdin_closes,
+        longer_than_the_limit,
+        task_ended("a1"),
+        init(),
+        calls("t3", "TaskStop", task_id="b1"),
+        task_updated("b1", "killed"),
+        answered("t3", "Successfully stopped task."),
+        result("Report written.", turns=2, ms=2_000, cost=0.02),
+    )
+    assert not outcome.is_error
+    assert client.stopped == []
+    assert not any("WAITING" in line for line in lines)
+
+
+def test_a_command_outlasting_the_agent_fails_the_stage_and_says_it_may_be_running(play, short_limit, monkeypatch):
+    """stdin went with the agent's wait, so stop_task can't reach the CLI. The run still
+    doesn't stall, and whoever reads the report knows to go and look."""
+    monkeypatch.setattr(session, "SESSION_EXIT_GRACE_SECONDS", TICK)
+    outcome, _, client = play(
+        init(),
+        calls("t1", "Bash", command=SERVER, run_in_background=True),
+        background_task("b1", "t1"),
+        answered("t1", "Command running in background with ID: b1."),
+        calls("t2", "Agent", prompt="test the server", run_in_background=True),
+        background_task("a1", "t2", task_type="local_agent"),
+        answered("t2", "Async agent launched successfully."),
+        result("Waiting for the agent.", turns=3, ms=2_000, cost=0.01),
+        until_stdin_closes,
+        task_ended("a1"),
+        init(),
+        says("The agent's done."),
+        result("The agent's done.", turns=1, ms=2_000, cost=0.02),
+        never,
+    )
+    assert outcome.is_error
+    assert f"`{SERVER}`" in outcome.summary
+    assert "couldn't stop" in outcome.summary and "still running" in outcome.summary
+    assert "It stopped them first" not in outcome.summary, "it didn't"
+    assert client.stopped == []
+    assert client.disconnected
+
+
+def test_an_agent_that_ends_with_no_wake_still_starts_the_clock(play, short_limit, monkeypatch):
+    """Not every ending wakes the session, and there'd be no result to start it from."""
+    monkeypatch.setattr(session, "SESSION_EXIT_GRACE_SECONDS", TICK)
+    monkeypatch.setattr(session, "SHELL_SETTLE_SECONDS", TICK)
+    outcome, lines, _ = play(
+        init(),
+        calls("t1", "Bash", command=SERVER, run_in_background=True),
+        background_task("b1", "t1"),
+        calls("t2", "Agent", prompt="test the server", run_in_background=True),
+        background_task("a1", "t2", task_type="local_agent"),
+        result("Waiting for the agent.", turns=3, ms=2_000, cost=0.01),
+        until_stdin_closes,
+        task_ended("a1"),
+        never,
+    )
+    assert outcome.is_error
+    assert any("WAITING" in line for line in lines)
+
+
+@pytest.mark.parametrize("kind", ["post_turn_memory", "dream", "auto_mode_scan"])
+def test_the_clis_own_housekeeping_neither_holds_a_command_nor_gets_stopped(play, short_limit, kind):
+    """Only agents get the SDK's patience. Taking one of these for an agent would let go
+    of stdin with no result coming to start the clock, and the stall would be back."""
+    outcome, _, client = play(
+        *left_a_server()[:3],
+        background_task("h1", "t9", task_type=kind),
+        result("Dev server started.", turns=2, ms=5_000, cost=0.01),
+        stdin_still_open,
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert client.stopped == ["b1"]
+    assert outcome.is_error
+
+
+def test_one_of_two_commands_ending_does_not_let_the_other_off(play, short_limit, monkeypatch):
+    monkeypatch.setattr(session, "SHELL_SETTLE_SECONDS", TICK)
+    outcome, _, client = play(
+        init(),
+        calls("t1", "Bash", command=SERVER, run_in_background=True),
+        background_task("b1", "t1"),
+        calls("t2", "Bash", command="sleep 1", run_in_background=True),
+        background_task("b2", "t2"),
+        result("Started both.", turns=3, ms=1_000, cost=0.01),
+        task_ended("b2"),
+        until_stopped,
+        task_ended("b1", "stopped"),
+    )
+    assert client.stopped == ["b1"]
+    assert outcome.is_error
+    assert f"`{SERVER}`" in outcome.summary and "sleep 1" not in outcome.summary
+
+
+def test_a_cli_that_will_not_exit_is_ended_anyway(play, short_limit, monkeypatch):
+    """stop_task is the clean way out, but nothing should depend on the CLI's cooperation."""
+    monkeypatch.setattr(session, "SESSION_EXIT_GRACE_SECONDS", TICK)
+    outcome, _, client = play(*left_a_server(), until_stopped, never)
+    assert outcome.is_error
+    assert client.disconnected
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_every_session_shape_can_be_stopped(play, short_limit, interactive):
+    """-i and -y both hold the prompt stream open; the SDK closes stdin at once otherwise."""
+    outcome, _, client = play(
+        *left_a_server(), until_stopped, task_ended("b1", "stopped"), interactive=interactive
+    )
+    assert client.stopped == ["b1"]
+    assert outcome.is_error
+
+
+@pytest.mark.parametrize(
+    "raw, seconds",
+    [
+        (None, session.SHELL_WAIT_DEFAULT_SECONDS),
+        ("90", 90),
+        ("1.5", 1.5),
+        ("0", 0),
+        ("ten minutes", session.SHELL_WAIT_DEFAULT_SECONDS),
+        ("-1", session.SHELL_WAIT_DEFAULT_SECONDS),
+        ("inf", session.SHELL_WAIT_DEFAULT_SECONDS),
+        ("nan", session.SHELL_WAIT_DEFAULT_SECONDS),
+    ],
+)
+def test_the_limit_comes_from_the_environment(monkeypatch, raw, seconds):
+    if raw is None:
+        monkeypatch.delenv(session.SHELL_WAIT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(session.SHELL_WAIT_ENV, raw)
+    assert session._shell_wait_seconds() == seconds
+
+
+def test_the_run_stops_at_a_stage_that_left_a_command_running(run, script_sessions, short_limit, tmp_path):
+    clients = script_sessions(*left_a_server(), until_stopped, task_ended("b1", "stopped"))
+    pipeline = Pipeline(
+        name="t",
+        stages=(Stage(name="place", prompt_template="{task}"), Stage(name="system", prompt_template="{task}")),
+        handoff_template="{summary}",
+    )
+    chan = channel.open_channel(tmp_path / "chan", forbidden={})
+    try:
+        results = run(
+            run_loop(
+                task="T", workspace=tmp_path / "ws", pipeline=pipeline,
+                runs_dir=tmp_path / "runs", log=lambda _: None,
+            )
+        )
+        events = channel.read_events(chan.dir)
+    finally:
+        channel.close_channel()
+
+    assert len(clients) == 1, "the next stage must not start"
+    assert [r.stage for r in results] == ["place"] and results[0].is_error
+    assert "stage_waiting" in [e["event"] for e in events]
+    finished = next(e for e in events if e["event"] == "stage_finished")
+    assert finished["is_error"] is True and SERVER in finished["summary"]
+    assert next(e for e in events if e["event"] == "run_complete")["failed_stage"] == "place"

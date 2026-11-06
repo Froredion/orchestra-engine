@@ -806,26 +806,16 @@ def test_handoff_server_serves_the_body_verbatim(run):
     assert called.content[0].text == body
 
 
-def test_handoff_tool_is_auto_approved_and_widens_nothing(monkeypatch, tmp_path, run):
+def test_handoff_tool_is_auto_approved_and_widens_nothing(script_sessions, tmp_path, run):
     """allowed_tools is the SDK's auto-approve list, not an exclusive allowlist.
     The engine names exactly one tool there — enough that an unattended run does
     not stall on a gate for its own data channel, and not enough to touch what
     else a stage may use."""
     from orchestra_engine.engine import session
 
-    captured = {}
-
-    def fake_query(prompt, options):
-        captured["options"] = options
-
-        async def empty():
-            return
-            yield
-
-        return empty()
-
-    monkeypatch.setattr(session, "query", fake_query)
+    clients = script_sessions()
     run(
+
         session._run_session(
             "design", "do it", tmp_path, tmp_path,
             permission_mode="auto", max_turns=None, model=None, interactive=False,
@@ -833,9 +823,9 @@ def test_handoff_tool_is_auto_approved_and_widens_nothing(monkeypatch, tmp_path,
             handoff_body="--- HANDOFF ---\nx\n--- END HANDOFF ---\n",
         )
     )
-    opts = captured["options"]
+    opts = clients[0].options
     assert opts.allowed_tools == [handoff_tool.QUALIFIED_TOOL]
     assert list(opts.mcp_servers) == [handoff_tool.SERVER_NAME]
     # The report is not in the prompt the session was given.
-    assert "--- HANDOFF ---" not in captured.get("prompt", "")
+    assert "--- HANDOFF ---" not in clients[0].prompts[0]["message"]["content"]
 
