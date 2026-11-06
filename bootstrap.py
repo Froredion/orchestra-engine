@@ -39,6 +39,21 @@ def run(cmd: list[str]) -> None:
         sys.exit(f"\nSetup failed at: {printable}")
 
 
+def ask(prompt: str) -> str | None:
+    """Ask the person at the terminal, or return None if nobody can answer.
+
+    isatty() alone can't say. On Windows the null device is a character device, so
+    it reports True for `< NUL`, which is what a background launch gets, and input()
+    then raises EOFError. stdin can also be closed outright, leaving it None."""
+    if sys.stdin is None or not sys.stdin.isatty():
+        return None
+    try:
+        return input(prompt)
+    except EOFError:
+        print()  # the prompt is still on the line
+        return None
+
+
 def main() -> None:
     if sys.version_info < MIN_PYTHON:
         need = ".".join(map(str, MIN_PYTHON))
@@ -77,14 +92,13 @@ def main() -> None:
     )
     # Ask rather than just do it: it writes outside this repo. With no terminal
     # (CI, a script) nobody can answer, so print the command instead.
-    if sys.stdin.isatty():
-        answer = input("Install the agent guidance now? [Y/n] ").strip().lower()
-        if answer in ("", "y", "yes"):
-            subprocess.run([str(py), "-m", "orchestra_engine", "--install-guidance"])
-        else:
-            print(f"Skipped. Run it later with: {launcher} --install-guidance")
-    else:
+    answer = ask("Install the agent guidance now? [Y/n] ")
+    if answer is None:
         print(f"Run it with: {launcher} --install-guidance")
+    elif answer.strip().lower() in ("", "y", "yes"):
+        subprocess.run([str(py), "-m", "orchestra_engine", "--install-guidance"])
+    else:
+        print(f"Skipped. Run it later with: {launcher} --install-guidance")
 
     # End on a verdict, not a wall of pip output: is this machine ready?
     print("\n===== checking this machine =====")
