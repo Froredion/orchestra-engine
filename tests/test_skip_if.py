@@ -109,7 +109,7 @@ def test_missing_gate_file_fails_open_and_says_so(run, tmp_path, stub, logs):
     assert any("GATE NOT EVALUATED" in line and "not found" in line for line in logs)
 
 
-def test_symlink_out_of_artifacts_is_refused(run, tmp_path, stub, logs):
+def test_symlink_out_of_artifacts_is_refused(run, tmp_path, stub, logs, symlink):
     """resolve() follows symlinks, so a link an agent plants in the artifacts
     dir can't smuggle a verdict in from outside it."""
     outside = tmp_path / "elsewhere.txt"
@@ -117,7 +117,7 @@ def test_symlink_out_of_artifacts_is_refused(run, tmp_path, stub, logs):
 
     def plant_symlink(name, artifacts):
         if name == "reproduce":
-            (artifacts / "verdict.txt").symlink_to(outside)
+            symlink(artifacts / "verdict.txt", outside)
 
     calls, _ = stub(
         make_pipeline(

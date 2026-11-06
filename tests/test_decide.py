@@ -367,7 +367,7 @@ def test_skip_if_on_a_decider_skips_it_without_routing(run, tmp_path, stub):
     assert [c["stage"] for c in calls] == ["reproduce", "prevent"], "decide gated out"
 
 
-def test_symlinked_decision_outside_artifacts_is_refused(run, tmp_path, stub, logs):
+def test_symlinked_decision_outside_artifacts_is_refused(run, tmp_path, stub, logs, symlink):
     """resolve() follows the link, so a decision.json an agent points outside the
     artifacts dir can't smuggle in a jump target from elsewhere."""
     outside = tmp_path / "planted.json"
@@ -375,7 +375,7 @@ def test_symlinked_decision_outside_artifacts_is_refused(run, tmp_path, stub, lo
 
     def plant_symlink(name, artifacts):
         if name == "decide":
-            (artifacts / "decision.json").symlink_to(outside)
+            symlink(artifacts / "decision.json", outside)
 
     calls, _ = stub(
         make_pipeline(
