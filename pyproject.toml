@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Erickson Talaue" }]
 requires-python = ">=3.10"
 dependencies = [
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.2.178",
     "questionary>=2.0",
     # The live view's own window. Linux would need a GTK or Qt stack on top,
     # so there the page opens in the browser instead.

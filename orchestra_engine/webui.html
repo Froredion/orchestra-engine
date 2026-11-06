@@ -328,6 +328,8 @@ function handle(e) {
       append(el("div", "note", `<b>${esc(e.stage)}</b> skipped — ${esc(e.reason || "")}`)); break;
     case "stage_woken":
       append(el("div", "note", `<b>${esc(e.label || e.stage)}</b> ended its turn, then was woken again`)); break;
+    case "stage_waiting":
+      append(el("div", "note", `<b>${esc(e.label || e.stage)}</b> ended its turn and left ${esc((e.commands || []).join("; "))} running. It fails in ${esc(String(e.limit_seconds))} s if that's still so`)); break;
     case "message": message(e); break;
     case "prompt": S.pending = e; showPrompt(e); break;
     case "answered":

@@ -14,22 +14,6 @@ from orchestra_engine.engine import DEFAULT_SETTING_SOURCES
 from orchestra_engine.main import resolve_setting_sources
 
 
-class RecordingQuery:
-    """Stands in for the SDK's query(), capturing the options it was handed."""
-
-    def __init__(self):
-        self.options = None
-
-    def __call__(self, *, prompt, options):
-        self.options = options
-
-        async def empty():
-            return
-            yield  # pragma: no cover — makes this an async generator
-
-        return empty()
-
-
 def run_one(run, tmp_path, **kwargs):
     return run(
         session.run_stage(
@@ -38,45 +22,41 @@ def run_one(run, tmp_path, **kwargs):
     )
 
 
-def test_user_memory_is_not_loaded_by_default(run, monkeypatch, tmp_path):
+def test_user_memory_is_not_loaded_by_default(run, script_sessions, tmp_path):
     """The regression this exists for: with no --setting-sources, a stage must
     not inherit the operator's global CLAUDE.md."""
-    q = RecordingQuery()
-    monkeypatch.setattr(session, "query", q)
+    clients = script_sessions()
 
     run_one(run, tmp_path)
 
-    assert q.options.setting_sources == ["project"]
-    assert "user" not in q.options.setting_sources
+    assert clients[0].options.setting_sources == ["project"]
+    assert "user" not in clients[0].options.setting_sources
 
 
-def test_setting_sources_is_always_explicit(run, monkeypatch, tmp_path):
+def test_setting_sources_is_always_explicit(run, script_sessions, tmp_path):
     """Never left as None: that is what makes the CLI apply its own default."""
-    q = RecordingQuery()
-    monkeypatch.setattr(session, "query", q)
+    clients = script_sessions()
 
     run_one(run, tmp_path)
 
-    assert q.options.setting_sources is not None
+    assert clients[0].options.setting_sources is not None
 
 
-def test_caller_can_opt_user_memory_back_in(run, monkeypatch, tmp_path):
+def test_caller_can_opt_user_memory_back_in(run, script_sessions, tmp_path):
     """A pipeline needing a user-level MCP server has a way back."""
-    q = RecordingQuery()
-    monkeypatch.setattr(session, "query", q)
+    clients = script_sessions()
 
     run_one(run, tmp_path, setting_sources=("user", "project"))
 
-    assert q.options.setting_sources == ["user", "project"]
+    assert clients[0].options.setting_sources == ["user", "project"]
 
 
-def test_empty_sources_loads_nothing(run, monkeypatch, tmp_path):
-    q = RecordingQuery()
-    monkeypatch.setattr(session, "query", q)
+def test_empty_sources_loads_nothing(run, script_sessions, tmp_path):
+    clients = script_sessions()
 
     run_one(run, tmp_path, setting_sources=())
 
-    assert q.options.setting_sources == []
+    assert clients[0].options.setting_sources == []
 
 
 @pytest.mark.parametrize(

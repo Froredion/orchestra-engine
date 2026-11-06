@@ -665,15 +665,34 @@ exchange).
 
 ### A stage that ends its turn to wait
 
-Ending its turn ends a stage, and every stage is told so. If it ends its turn on a
-background command instead, the SDK closes the session's stdin, the command
-finishes, and the CLI wakes the session for another turn with nothing left to
-answer it. In an interactive stage every tool call of that turn comes back as
-"The user doesn't want to take this action", with no prompt shown, and the CLI
-reports success. The engine fails a stage that gets that refusal, since no person
-said it, and stops the run. A wake with no refusal is logged and sent as a
-`stage_woken` event, but isn't a failure: a background sub-agent wakes the session
-the same way, and the SDK keeps stdin open for it. `run.json` counts the turns and
+Ending its turn ends a stage, and every stage is told so. If it leaves a background
+command running, the CLI holds the session open for as long as the command runs and
+sends nothing, so a stalled run looks just like a slow one.
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` doesn't bound this. A background command has
+its own deadline, 30 minutes unless the agent gave it a `timeout`. At that deadline
+the CLI kills it, wakes the session and suggests starting it again with a longer one,
+up to two hours.
+
+So the engine bounds it, and says so. A `stage_waiting` event names the command as
+soon as the turn ends, and the command gets `ORCHESTRA_SHELL_WAIT_SECONDS` (600 by
+default) to finish. If it does, the session is woken with its tools still working and
+the stage goes on. If it doesn't, the engine stops it, fails the stage with a summary
+naming it, and stops the run. A stage has to finish or stop what it starts, so this
+includes one that did its work and forgot a dev server. Stopping the command matters:
+ending the session alone leaves it running on Windows, still holding its port.
+
+A background sub-agent is left alone however long it takes, along with any command
+running beside it. The SDK and the CLI wait for it, up to
+`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`, and it wakes the session the same way. If a
+command then outlasts the agent's follow-up turn, the session's stdin can be closed
+already. The stage still fails at the limit, and its summary says the command may
+still be running.
+
+If a woken session does find its stdin closed, every tool call of that turn in an
+interactive stage comes back as "The user doesn't want to take this action", with no
+prompt shown, and the CLI reports success. The engine fails a stage that gets that
+refusal, since no person said it, and stops the run. A wake with no refusal is logged
+and sent as a `stage_woken` event, but isn't a failure. `run.json` counts the turns and
 duration of the whole session, and its `segments` field says how many turns of its
 own the session took.
 
