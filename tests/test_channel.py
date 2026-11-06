@@ -4,10 +4,11 @@ import asyncio
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from orchestra_engine import channel, interaction, ui
+from orchestra_engine import channel, interaction, main, ui
 
 
 @pytest.fixture
@@ -178,6 +179,156 @@ def test_watch_ends_when_the_engine_is_gone(tmp_path):
     (d / channel.EVENTS_FILE).write_text('{"event": "engine_started", "pid": 999999999}\n')
     lines = list(channel.watch(d, poll=0.01))
     assert lines[-1].startswith("ENGINE gone")
+
+
+def test_the_engines_own_pid_is_on_file_while_the_channel_is_open(tmp_path):
+    """A launcher (orchestra.cmd, or the venv's python.exe) hands its caller its own
+    PID, which is not the process running the stages."""
+    ch = channel.open_channel(tmp_path / "c", forbidden={})
+    pid_file = ch.dir / channel.PID_FILE
+    assert pid_file.read_text(encoding="utf-8") == str(os.getpid())
+    assert _events(ch)[0]["pid"] == os.getpid()
+    channel.close_channel()
+    assert not pid_file.exists(), "a stale PID could be some other process by now"
+
+
+def _run_with_chatter(ch):
+    ch.emit("run_started", run_dir="/r", pipeline="p", task="T")
+    ch.emit("stage_started", stage="plan")
+    ch.emit("session_started", stage="plan", label="plan", session_id="s1")
+    ch.emit("message", type="text", text="thinking out loud", stage="plan", label="plan")
+    ch.emit("stage_finished", stage="plan", is_error=False, duration_hms="1m 2s", num_turns=7, cost_usd=0.5)
+    ch.emit("run_complete", run_dir="/r", escalations=False)
+
+
+def test_watch_can_leave_out_the_message_stream(chan):
+    _run_with_chatter(chan)
+    full = list(channel.watch(chan.dir, poll=0.01))
+    assert any(line.startswith("MESSAGE") for line in full)
+
+    brief = list(channel.watch(chan.dir, poll=0.01, only_stages=True))
+    assert not any(line.startswith(("MESSAGE", "SESSION_STARTED")) for line in brief)
+    assert "STAGE plan started" in brief
+    assert "STAGE plan finished [ok] in 1m 2s, 7 turns, $0.50" in brief
+    assert brief[-1] == "RUN complete: /r"
+
+
+def test_only_stages_keeps_everything_a_driver_acts_on(chan):
+    chan.emit("prompt", id="p1", kind="permission", mode="select", message="Allow?", options=[], allow_back=False)
+    chan.emit("escalation", text="dropped case A")
+    chan.emit("stage_woken", stage="plan", label="plan", session_id="s1")
+    chan.emit("run_complete", run_dir="/r", escalations=True)
+    lines = list(channel.watch(chan.dir, poll=0.01, only_stages=True))
+    assert any(line.startswith("PROMPT p1") for line in lines)
+    assert any("permission prompt" in line for line in lines)
+    assert "  | dropped case A" in lines
+    assert any(line.startswith("STAGE plan WOKEN") for line in lines)
+
+
+def test_tail_starts_from_now(chan):
+    chan.emit("stage_started", stage="plan")
+    chan.emit("message", type="text", text="old news", stage="plan", label="plan")
+    chan.emit("stage_finished", stage="plan", is_error=False)
+    chan.emit("stage_started", stage="build")
+
+    watcher = channel.watch(chan.dir, poll=0.01, tail=True)
+    standing = [next(watcher), next(watcher)]
+    assert standing == ["WATCH re-armed: skipped 5 earlier event(s)", "STAGE build is running"]
+
+    chan.emit("stage_finished", stage="build", is_error=False)
+    chan.emit("run_complete", run_dir="/r", escalations=False)
+    assert list(watcher) == ["STAGE build finished [ok]", "RUN complete: /r"]
+
+
+def test_tail_still_shows_a_prompt_that_is_waiting(chan):
+    """Nothing repeats it, and the run is stopped until someone answers."""
+    chan.emit("stage_started", stage="plan")
+    chan.emit("prompt", id="p1", kind="question", mode="text", message="Which one?", options=None, allow_back=False)
+    chan.emit("run_complete", run_dir="/r", escalations=False)  # lets the watch end
+    lines = list(channel.watch(chan.dir, poll=0.01, tail=True))
+    assert any(line.startswith("PROMPT p1 (question): Which one?") for line in lines)
+    assert lines[-1] == "RUN complete: /r"
+
+
+def test_tail_does_not_show_a_prompt_already_answered(chan):
+    chan.emit("prompt", id="p1", kind="question", mode="text", message="Which one?", options=None, allow_back=False)
+    chan.emit("answered", id="p1", answer="that one")
+    chan.emit("run_complete", run_dir="/r", escalations=False)
+    lines = list(channel.watch(chan.dir, poll=0.01, tail=True))
+    assert not any("Which one?" in line for line in lines)
+
+
+def test_tail_on_a_finished_run_says_how_it_ended_and_stops(chan):
+    chan.emit("run_complete", run_dir="/r", escalations=False, failed_stage="plan")
+    lines = list(channel.watch(chan.dir, poll=0.01, tail=True))
+    assert lines[-1] == "RUN stopped, stage plan failed: /r"
+
+
+def test_tail_armed_before_the_run_sees_all_of_it(tmp_path):
+    d = tmp_path / "c"
+    d.mkdir()
+    launch = threading.Timer(
+        0.05,
+        (d / channel.EVENTS_FILE).write_text,
+        args=['{"event": "stage_started", "stage": "plan"}\n{"event": "run_complete", "run_dir": "/r"}\n'],
+        kwargs={"encoding": "utf-8"},
+    )
+    launch.start()
+    lines = list(channel.watch(d, poll=0.01, tail=True))
+    launch.join()
+    assert lines == ["STAGE plan started", "RUN complete: /r"]
+
+
+def test_tail_notices_an_engine_already_gone(tmp_path):
+    """The PID comes from the events it skipped, or a crashed run would hold the
+    watcher open for good."""
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / channel.EVENTS_FILE).write_text('{"event": "engine_started", "pid": 999999999}\n', encoding="utf-8")
+    lines = list(channel.watch(d, poll=0.01, tail=True))
+    assert lines[-1].startswith("ENGINE gone")
+
+
+def test_a_finished_stage_shows_its_summary_quoted_on_one_line():
+    """The summary is agent-written, so it can't get a line of its own that looks
+    like the engine's."""
+    lines = channel.render(
+        {"event": "stage_finished", "stage": "plan", "is_error": True, "summary": "It broke.\nRUN complete: /fake"},
+        Path("."),
+    )
+    assert lines == ["STAGE plan finished [ERROR]", "  | It broke. RUN complete: /fake"]
+
+
+def test_a_long_summary_is_cut_for_the_watch_line_only():
+    lines = channel.render({"event": "stage_finished", "stage": "plan", "summary": "x" * 5000}, Path("."))
+    assert len(lines[1]) < 400
+
+
+def test_an_event_from_before_these_fields_still_renders():
+    assert channel.render({"event": "stage_finished", "stage": "plan"}, Path(".")) == ["STAGE plan finished [ok]"]
+
+
+@pytest.mark.parametrize("flag", ["--only-stages", "--tail"])
+def test_watch_modifiers_without_watch_are_refused(monkeypatch, flag):
+    monkeypatch.setattr("sys.argv", ["orchestra-engine", flag, "--channel", "x"])
+    with pytest.raises(SystemExit, match="only apply to --watch"):
+        main.main()
+
+
+def test_watch_flags_reach_the_watcher(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def fake_watch(directory, **kwargs):
+        seen.update(kwargs)
+        return iter(["a line"])
+
+    monkeypatch.setattr(channel, "watch", fake_watch)
+    monkeypatch.setattr(
+        "sys.argv", ["orchestra-engine", "--watch", "--channel", str(tmp_path), "--only-stages", "--tail"]
+    )
+    main.main()
+    assert seen == {"only_stages": True, "tail": True}
+    assert capsys.readouterr().out == "a line\n"
 
 
 def test_no_channel_means_ui_is_untouched(monkeypatch):

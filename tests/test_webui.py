@@ -189,6 +189,8 @@ def test_summary_statuses():
                       {"event": "engine_exited", "ts": 10}]
     assert s(done)["status"] == "finished" and s(done)["escalations"] and s(done)["cost_usd"] == 0.5
     assert s(started + [{"event": "engine_exited", "ts": 3}])["status"] == "stopped"
+    failed = started + [{"event": "run_complete", "ts": 9, "failed_stage": "plan"}]
+    assert s(failed)["status"] == "stopped", "a run that stopped on a failed stage didn't finish"
 
 
 def test_a_run_whose_engine_died_reads_as_stopped(run):

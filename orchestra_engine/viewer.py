@@ -132,7 +132,8 @@ def summarize(events: list[dict]) -> dict:
         elif kind == "stage_finished":
             out["cost_usd"] += e.get("cost_usd") or 0
         elif kind == "run_complete":
-            out["status"], out["ended"] = "finished", e.get("ts")
+            out["status"] = "stopped" if e.get("failed_stage") else "finished"
+            out["ended"] = e.get("ts")
             out["escalations"] = bool(e.get("escalations"))
         elif kind == "engine_exited" and out["status"] != "finished":
             out["status"], out["ended"] = "stopped", e.get("ts")

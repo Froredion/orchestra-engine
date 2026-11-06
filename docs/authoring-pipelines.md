@@ -27,11 +27,32 @@ decide: reproduce, diagnose          # let this stage also jump the run back to
 redirect: ../../skills/deep-review/SKILL.md   # take the prompt from that file
                      # instead of from the body below (see "Pointing at the
                      # prompt")
+produces: PLAN.md, leads.txt   # documents this stage must leave, or the run
+                     # stops here (see "Requiring a document")
 ---
 ```
 
-Paths in frontmatter (`fan_out`, `skip_if`) are relative to the run's
+Paths in frontmatter (`fan_out`, `skip_if`, `produces`) are relative to the run's
 artifacts directory — see [Where things get written](../README.md#where-things-get-written).
+
+## Requiring a document: `produces`
+
+`produces: <file>, <file>` names the documents a stage must leave in the artifacts
+directory. When the stage ends, one that is missing or empty fails the stage and
+stops the run, whatever the session reported. Without it the engine advances on
+the session's word, and a session that was stopped partway reports as calmly as
+one that finished, so the next stage starts without its input and does the work
+over, or does something else.
+
+```
+[place] STAGE FAILED: it did not leave PLACE.md in …/artifacts, which its
+        `produces:` says it must. Stopping the loop.
+```
+
+Use it where a later stage can't go on without the document. It checks that the
+file is there and not empty, not that this pass wrote it, so a stage sent back by
+a route-back may keep what it wrote the first time. For a fan-out or a `repeat`,
+it's checked once, after all the items or passes are done.
 
 ## Publishing for a human: `{docs}`
 
@@ -75,7 +96,7 @@ still a directory listing. What the engine does with the pointer:
 |---|---|
 | **Resolution** | Against the stage file's own directory. `..` and absolute paths are both fine, unlike `fan_out`/`skip_if`: those name files an *agent* wrote mid-run, this names authored content in a folder you chose. |
 | **The target's frontmatter** | Cut on its fences and thrown away, keys unread. That's what lets a `SKILL.md` work as-is — its `name:`/`description:` YAML is a different dialect, and reading it as stage options would fail the load on every skill file. |
-| **Shape** | Still the stage file's. `repeat`, `fan_out`, `skip_if` and `decide` sit alongside `redirect` and mean exactly what they always did. |
+| **Shape** | Still the stage file's. `repeat`, `fan_out`, `skip_if`, `decide` and `produces` sit alongside `redirect` and mean exactly what they always did. |
 | **Braces** | Everything in the target except `{task}` and the other placeholders becomes literal text, so a JSON sample or a `${VAR}` in a file written for humans can't break rendering halfway through a run. |
 | **Chaining** | None. A `redirect:` inside the target leaves with the rest of its frontmatter, so redirects are one hop and can't cycle. |
 

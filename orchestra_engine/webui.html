@@ -326,6 +326,8 @@ function handle(e) {
     case "stage_skipped":
       S.status[e.stage] = {state: "skipped"}; renderStages();
       append(el("div", "note", `<b>${esc(e.stage)}</b> skipped — ${esc(e.reason || "")}`)); break;
+    case "stage_woken":
+      append(el("div", "note", `<b>${esc(e.label || e.stage)}</b> ended its turn, then was woken again`)); break;
     case "message": message(e); break;
     case "prompt": S.pending = e; showPrompt(e); break;
     case "answered":
@@ -338,6 +340,10 @@ function handle(e) {
     }
     case "run_complete":
       S.done = true; S.ended = e.ts;
+      if (e.failed_stage) {
+        setStatus(`Stopped — stage ${e.failed_stage} failed`, "ended");
+        append(el("div", "end", `Run stopped: stage ${esc(e.failed_stage)} failed`)); break;
+      }
       setStatus(e.escalations ? "Finished — escalations unresolved" : "Finished", "ended");
       append(el("div", "end", "Run complete")); break;
     case "engine_exited":

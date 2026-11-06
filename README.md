@@ -260,8 +260,9 @@ flowchart LR
 
 **Authoring your own?** [docs/authoring-pipelines.md](docs/authoring-pipelines.md)
 is the frontmatter reference: `repeat`, `fan_out`, `skip_if`, `decide`,
-`redirect` (point a stage at a prompt kept elsewhere, e.g. an existing
-`SKILL.md`), the `handoff` scope, and the `decision.json` routing protocol every
+`produces` (a document a stage must leave, or the run stops), `redirect` (point a
+stage at a prompt kept elsewhere, e.g. an existing `SKILL.md`), the `handoff`
+scope, and the `decision.json` routing protocol every
 plain stage uses to send the run forward or back. The shapes a stage can take,
 at a glance:
 
@@ -538,9 +539,11 @@ flowchart TD
 | `--pipelines-dir` | none | Extra directory of pipeline folders to discover by name (repeatable; or set `$ORCHESTRA_PIPELINES_PATH`) |
 | `-i`, `--interactive` | off | Human-in-the-loop: agents ask you questions via the built-in AskUserQuestion tool, tool calls the permission mode doesn't auto-approve need your y/n, and each stage starts with a run/skip/quit gate. Prompts appear in the live view; with `--no-ui` they're asked in the terminal instead. To drive it from another process, use `--channel`. |
 | `--no-stage-gates` | off | With `-i`, skip the run/skip/quit prompt before each stage and just walk the pipeline. Agents can still ask you questions and non-auto-approved tool calls still need your y/n; only the per-stage gate goes. For pipelines where you're present to *do* the work rather than supervise the walk, the gate is ceremony between you and it |
-| `--channel DIR` | off | Drive the run from another process instead of stdin. The engine appends one JSON event per line to `DIR/events.jsonl`: stage start/finish, each escalation as it's raised, run complete, and every prompt with an id and a kind (`gate` / `question` / `permission`). Every prompt then waits for `--answer`. Give each run a fresh DIR, outside the workspace and the runs/docs dirs (refused otherwise: whoever writes it answers the permission prompts). Created `0700` |
+| `--channel DIR` | off | Drive the run from another process instead of stdin. The engine appends one JSON event per line to `DIR/events.jsonl`: stage start and finish (a finish carries the duration, turns, cost, session ID and summary), each escalation as it's raised, run complete (naming the stage if one failed), and every prompt with an id and a kind (`gate` / `question` / `permission`). Every prompt then waits for `--answer`. `DIR/engine.pid` holds the engine's own PID while the channel is open, since a launcher hands its caller the launcher's PID. Give each run a fresh DIR, outside the workspace and the runs/docs dirs (refused otherwise: whoever writes it answers the permission prompts). Created `0700` |
 | `--answer ID VALUE` | none | With `--channel DIR`: answer the waiting prompt with an option's number or value, `1,3` for a checkbox, or free text. Refused unless ID is the prompt actually waiting, or if the option is out of range, so a stale reply can't land on the wrong question |
 | `--watch` | none | With `--channel DIR`: print each event as one line and exit when the run completes or its engine dies. Can start before the run. Built to be streamed by a monitoring tool |
+| `--only-stages` | off | With `--watch`: leave out the per-message stream (a real run writes a thousand or more of those), keeping stages starting and finishing, prompts, escalations and the run ending |
+| `--tail` | off | With `--watch`: don't replay what's already on file. Say where the run stands, including any prompt still waiting, then follow from there. For re-arming a watcher partway through a run |
 | `--no-ui` | off | Terminal only. By default every run appears in the **live view**, one window for all runs (an app window on macOS/Windows, a browser tab on Linux): each run in the sidebar (running / needs you / finished / stopped), its stages under it, and its thinking, messages and tool calls streaming in as a chat, with every prompt answered by a button. One shared viewer serves it on `127.0.0.1` behind a one-off token; the first run starts it, later runs join it without opening another, and it exits once idle. Runs are recorded in `~/.orchestra-engine` (`ORCHESTRA_ENGINE_HOME` overrides). This flag turns all of that off (CI, SSH); prompts then go to stdin unless `--channel` is given |
 | `--view [DIR]` | none | Open the live view without starting a run; finished runs stay browsable there. With DIR, a channel directory recorded elsewhere is added to it first |
 | `--stages` | all | Comma-separated subset of the pipeline's stages (order preserved) |
@@ -659,6 +662,20 @@ answer prompts by id, so a stale answer is refused instead of landing on the
 wrong question. Stage gates are the driver's to answer; permission prompts are
 the human's (the diagram under [How to use it](#how-to-use-it) shows the
 exchange).
+
+### A stage that ends its turn to wait
+
+Ending its turn ends a stage, and every stage is told so. If it ends its turn on a
+background command instead, the SDK closes the session's stdin, the command
+finishes, and the CLI wakes the session for another turn with nothing left to
+answer it. In an interactive stage every tool call of that turn comes back as
+"The user doesn't want to take this action", with no prompt shown, and the CLI
+reports success. The engine fails a stage that gets that refusal, since no person
+said it, and stops the run. A wake with no refusal is logged and sent as a
+`stage_woken` event, but isn't a failure: a background sub-agent wakes the session
+the same way, and the SDK keeps stdin open for it. `run.json` counts the turns and
+duration of the whole session, and its `segments` field says how many turns of its
+own the session took.
 
 ## When a run gives something up: the escalation record
 
@@ -793,7 +810,7 @@ Agents get these writable roots and no others (the workspace via the session's
 prompt which one takes what. The documents directory is a third, handed out one
 stage at a time: a stage is granted it only if its own prompt names `{docs}`,
 so a pipeline's publishing stage can write there while every stage before it
-still cannot. `fan_out` and `skip_if` paths resolve against the artifacts
+still cannot. `fan_out`, `skip_if` and `produces` paths resolve against the artifacts
 directory, and are confined to it: a path that escapes it, whether by `..` at
 load time or a symlink at read time, is refused.
 
