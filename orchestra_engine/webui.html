@@ -321,7 +321,12 @@ function handle(e) {
       const st = S.status[e.stage] || {since: e.ts};
       S.status[e.stage] = {state: e.is_error ? "error" : "done", dur: e.ts - st.since};
       S.cost += e.cost_usd || 0; $("cost").textContent = "$" + S.cost.toFixed(2);
-      renderStages(); break;
+      renderStages();
+      if (e.is_error && e.summary) {  // nothing else on the page says why
+        const c = el("div", "callout"); c.appendChild(el("span", "t", `Stage ${esc(e.stage)} failed`));
+        c.appendChild(el("div", "text", md(tidy(e.summary)))); append(c);
+      }
+      break;
     }
     case "stage_skipped":
       S.status[e.stage] = {state: "skipped"}; renderStages();
