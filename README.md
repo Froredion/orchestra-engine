@@ -613,8 +613,9 @@ as a chat. Three things stream:
   src/client.py` tells you the step; a bare `Read` ten times over wouldn't.
 - **messages**: the stage's actual output as it's written.
 
-Escalations show up as callouts, and every prompt (stage gate, agent
-question, permission allow/deny) as buttons you can answer right there.
+Escalations show up as callouts, and so does the reason a stage failed. Every
+prompt (stage gate, agent question, permission allow/deny) shows up as buttons
+you can answer right there.
 
 ### The same stream in the terminal
 
